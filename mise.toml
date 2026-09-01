@@ -1,0 +1,40 @@
+# Rust tooling and benchmark dependencies.
+
+[tools]
+rust = { version = "1.98.0", components = "rustfmt,clippy" }
+
+# Benchmark dependencies are installed on demand.
+"cargo:hyperfine" = "1.20.0"
+"cargo:diskus" = "0.9.0"
+"cargo:du-dust" = "1.2.5"
+"cargo:parallel-disk-usage" = "0.24.0"
+gdu = "5.37.0"
+dua = "2.43.0"
+
+[tasks.build]
+description = "Build the Rust rdu binary"
+run = "cargo build --release"
+
+[tasks.test]
+description = "Run the Rust test suite"
+run = "cargo test"
+
+[tasks.lint]
+description = "Clippy with warnings denied"
+run = "cargo clippy --all-targets -- -D warnings"
+
+[tasks.fmt]
+description = "Format the Rust sources"
+run = "cargo fmt"
+
+[tasks.bench]
+description = "Benchmark against diskus, du, dust, pdu, ncdu and gdu"
+run = "./scripts/bench.sh"
+
+[tasks.bench-suite]
+description = "Benchmark the canonical fixture suite"
+run = "./scripts/bench-suite.sh"
+
+[tasks.perf]
+description = "Measure rdu CPU, memory and speed on real files"
+run = "./scripts/perf.sh"
