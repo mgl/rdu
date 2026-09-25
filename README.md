@@ -16,33 +16,185 @@ Requires Rust 1.98 or later.
 cargo install --git https://github.com/mgl/rdu.git
 ```
 
-## Usage
+## Quick start
 
-With a terminal on stdout, `rdu` opens the interactive browser by default:
-
-```sh
-rdu [PATH]
-```
-
-Use `-n` for non-interactive output:
+Scan the current directory:
 
 ```sh
-rdu -n -s "$HOME"             # print one total
-rdu -n --top 20 "$HOME"       # show the 20 largest files
-rdu -n --depth 2 /var         # show two directory levels
-rdu -n -a "$HOME"             # use apparent size
-rdu -n -o report.json "$HOME" # write a JSON report
-rdu -n -f report.json         # read a saved report
+rdu
 ```
 
-Use `rdu --help` for all options. `-L` follows file symlinks; directory
-symlinks are not followed.
+Pass a path to scan somewhere else:
 
-### Browser controls
+```sh
+rdu "$HOME"
+```
 
-`↑`/`↓` or `h`/`j`/`k`/`l` navigate. `s`, `n`, `C`, and `m` sort by size, name,
-item count, and modification time. `/` filters by name, `a` toggles apparent
-size, `?` shows help, and `q` quits.
+When standard output is a terminal, `rdu` opens the interactive browser. It
+prints text instead when output is redirected or piped. Use `-n` to force text
+output in a terminal.
+
+```sh
+rdu -n "$HOME"             # list the path's direct children
+rdu -n -s "$HOME"          # print one total
+rdu -n --depth 2 /var      # show two directory levels
+rdu -n --top 20 "$HOME"    # show the 20 largest files anywhere below the path
+rdu -n "$HOME" | head     # piping also selects text output
+```
+
+`--summarize`, `--depth`, and `--top` select different output layouts and
+cannot be combined. Entries are largest-first by default; `--reverse-sort`
+lists them smallest-first.
+
+## Sizes and display
+
+By default, `rdu` reports disk usage: the storage blocks allocated by the
+filesystem. Use `-a` to report apparent size (the file length) instead. Sparse
+files can have a much larger apparent size than disk usage.
+
+```sh
+rdu -n -a "$HOME"
+rdu -n -C "$HOME"          # include the number of items in each directory
+rdu -n --si "$HOME"        # decimal kB, MB, GB units
+rdu -n -k "$HOME"          # report every value in KiB
+rdu -n --no-prefix "$HOME" # report raw bytes
+rdu -n -c "$HOME"          # disable color
+```
+
+`--no-prefix` cannot be combined with `--si` or `--show-in-kib`. Color and scan
+progress are enabled only when their respective output streams are terminals;
+`--no-color` and `--no-progress` disable them explicitly.
+
+## Filtering
+
+### Directories
+
+Skip exact directory paths with `-i`. Relative paths are resolved from the
+directory being scanned, not from the shell's current directory.
+
+```sh
+rdu -i target,node_modules .
+rdu -i /var/cache /var
+rdu -H "$HOME"                         # skip directories beginning with a dot
+```
+
+Use `-I` for regular expressions. A pattern is matched against the complete
+absolute directory path, so include `.*` when matching an arbitrary prefix or
+suffix.
+
+```sh
+rdu -I '.*/(target|node_modules)' .
+rdu -I '.*/cache(/.*)?' "$HOME"
+```
+
+`-X FILE` reads one regular expression per non-empty line. Lines are trimmed;
+there is no special comment syntax.
+
+```text
+.*/target
+.*/node_modules
+```
+
+```sh
+rdu -X .rdu-ignore .
+```
+
+### File types and modification time
+
+`-T` counts only the listed filename extensions, while `-E` excludes them.
+Extensions are matched case-insensitively and should be written without a
+leading dot. The two modes cannot be combined.
+
+```sh
+rdu -T rs,toml .             # only .rs and .toml files
+rdu -E jpg,jpeg,png "$HOME"  # everything except these extensions
+```
+
+Time filters apply to file modification times. `--since` and `--until` accept
+an RFC 3339 timestamp or a local `YYYY-MM-DD` date; date bounds include the
+whole named day. Relative age filters accept compound durations using `y`,
+`mo`, `w`, `d`, `h`, `m`, and `s`. A year is 365 days and a month is 30 days.
+
+```sh
+rdu --since 2026-01-01 .
+rdu --until 2026-08-31T18:00:00+02:00 .
+rdu --max-age 7d .           # files modified within the last seven days
+rdu --min-age 1y2mo .        # files at least one year and two months old
+rdu --max-age 2h30m .
+```
+
+Multiple time options form an intersection, allowing an absolute or relative
+range to be narrowed further.
+
+## Filesystems and parallelism
+
+`rdu` counts each hard-linked inode once. Symlinks are measured as links by
+default. `-L` reports the target size of file symlinks, while directory
+symlinks are never followed. Use `-x` to stay on the filesystem where the scan
+started.
+
+The scanner normally uses several workers per available core to keep metadata
+lookups in flight. Limit it with `-m N`, or use `--sequential` for rotating
+disks. These two options cannot be combined.
+
+```sh
+rdu -x /
+rdu -m 8 "$HOME"
+rdu --sequential /mnt/hdd
+```
+
+Unreadable paths are marked in the results and skipped. After producing the
+available output, `rdu` reports that the scan was incomplete and exits with a
+failure status.
+
+## Saved reports
+
+Write the complete scan as JSON with `-o`, then reopen it later in the browser
+or render it as text without rescanning.
+
+```sh
+rdu -o report.json "$HOME"
+rdu -f report.json
+rdu -n --depth 2 -f report.json
+```
+
+Use `-` to stream a report through standard output or standard input:
+
+```sh
+rdu -o - "$HOME" >report.json
+rdu -n -f - <report.json
+```
+
+Reports use the same format as [gdu](https://github.com/dundee/gdu). With
+`--output-attrs`, an export can be limited to a comma-separated selection of
+`name`, `asize`, `dsize`, `items`, `mtime`, and `notreg`. `name` is always
+present; omitted numeric attributes are unavailable when the report is loaded
+again.
+
+```sh
+rdu -o sizes.json --output-attrs name,asize,dsize "$HOME"
+```
+
+Scan filters and scanner options have no effect with `-f`; display and output
+options still apply to the loaded tree.
+
+## Browser controls
+
+| Key | Action |
+| --- | --- |
+| `↑` / `k`, `↓` / `j` | Move the selection |
+| `g`, `G` | Jump to the first or last entry |
+| `Page Up`, `Page Down` | Move ten entries |
+| `→` / `l` / `Enter` | Enter the selected directory |
+| `←` / `h` | Return to the parent directory |
+| `s`, `n`, `C`, `m` | Sort by size, name, item count, or modification time |
+| Repeat a sort key | Reverse that sort order |
+| `a` | Toggle apparent size and disk usage |
+| `/` | Filter names; `Enter` keeps the filter and `Esc` clears it |
+| `?` | Show help |
+| `q`, `Ctrl-C` | Quit |
+
+Use `rdu --help` for the complete option reference.
 
 ## Benchmarks
 

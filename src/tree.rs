@@ -1,5 +1,6 @@
 //! The scanned directory tree and its accumulated statistics.
 
+use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStrExt;
@@ -197,8 +198,14 @@ impl Dir {
         let display_name = fs_name.to_string_lossy();
         let start = self.names.len() as u32;
         self.names.extend_from_slice(display_name.as_bytes());
-        let raw_start = self.names.len() as u32;
-        self.names.extend_from_slice(fs_name.as_bytes());
+        // Valid UTF-8 names can share their display and filesystem bytes.
+        let raw_start = if matches!(display_name, Cow::Borrowed(_)) {
+            start
+        } else {
+            let raw_start = self.names.len() as u32;
+            self.names.extend_from_slice(fs_name.as_bytes());
+            raw_start
+        };
         self.files.push(FileRecord {
             size: stats.size,
             usage: stats.usage,

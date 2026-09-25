@@ -188,18 +188,17 @@ fn visit(
     heap: &mut BinaryHeap<(Reverse<i64>, PathBuf)>,
 ) {
     for entry in dir.entries() {
-        let child = path.join(entry.name);
         match entry.dir {
-            Some(subdir) => visit(subdir, &child, n, apparent, heap),
+            Some(subdir) => visit(subdir, &path.join(entry.name), n, apparent, heap),
             None => {
                 let size = if apparent { entry.size } else { entry.usage };
                 if heap.len() < n {
-                    heap.push((Reverse(size), child));
+                    heap.push((Reverse(size), path.join(entry.name)));
                 } else if let Some((Reverse(smallest), _)) = heap.peek()
                     && size > *smallest
                 {
                     heap.pop();
-                    heap.push((Reverse(size), child));
+                    heap.push((Reverse(size), path.join(entry.name)));
                 }
             }
         }
