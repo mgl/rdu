@@ -241,16 +241,33 @@ mod tests {
     #[test]
     fn a_second_worker_actually_takes_work() {
         use std::collections::HashSet;
-        use std::sync::Mutex as StdMutex;
+        use std::sync::{Condvar as StdCondvar, Mutex as StdMutex};
 
         let threads: StdMutex<HashSet<std::thread::ThreadId>> = StdMutex::default();
-        run(2, 4_000u32, |left: u32, spawner| {
+        let rendezvous = (StdMutex::new(0), StdCondvar::new());
+        run(2, false, |seed, spawner| {
             threads.lock().unwrap().insert(std::thread::current().id());
-            if left > 0 {
-                spawner.push(left - 1);
-                spawner.push(0);
+
+            if seed {
+                let (arrivals, wake) = &rendezvous;
+                let mut arrivals = arrivals.lock().unwrap();
+                *arrivals += 1;
+                if *arrivals == 2 {
+                    wake.notify_all();
+                } else {
+                    let (arrivals, _) = wake
+                        .wait_timeout_while(
+                            arrivals,
+                            std::time::Duration::from_secs(1),
+                            |arrivals| *arrivals < 2,
+                        )
+                        .unwrap();
+                    assert_eq!(*arrivals, 2, "second worker did not rendezvous");
+                }
+            } else {
+                spawner.push(true);
+                spawner.push(true);
             }
-            std::hint::black_box(left);
         });
         assert_eq!(
             threads.lock().unwrap().len(),
