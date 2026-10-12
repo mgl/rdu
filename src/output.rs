@@ -40,28 +40,17 @@ impl<W: Write> Printer<W> {
         }
     }
 
-    fn order(&self) -> Order {
-        if self.reverse {
+    fn sorted<'a>(&self, dir: &'a Dir) -> Vec<Entry<'a>> {
+        let order = if self.reverse {
             Order::Ascending
         } else {
             Order::Descending
-        }
+        };
+        dir.sorted(SortBy::size(self.apparent), order)
     }
 
-    fn sort_by(&self) -> SortBy {
-        if self.apparent {
-            SortBy::ApparentSize
-        } else {
-            SortBy::Usage
-        }
-    }
-
-    fn size_of(&self, entry: &Entry<'_>) -> i64 {
-        if self.apparent {
-            entry.size
-        } else {
-            entry.usage
-        }
+    fn padded_size(&self, size: i64) -> String {
+        format!("{:>SIZE_WIDTH$}", format_size(size, self.size_format))
     }
 
     fn paint<'a>(&self, text: &'a str, color: &str) -> Cow<'a, str> {
@@ -74,17 +63,14 @@ impl<W: Write> Printer<W> {
 
     /// Lists `dir`'s direct children.
     pub fn dir(&mut self, dir: &Dir) -> io::Result<()> {
-        for entry in dir.sorted(self.sort_by(), self.order()) {
+        for entry in self.sorted(dir) {
             self.item(&entry)?;
         }
         Ok(())
     }
 
     fn item(&mut self, entry: &Entry<'_>) -> io::Result<()> {
-        let size = format!(
-            "{:>SIZE_WIDTH$}",
-            format_size(self.size_of(entry), self.size_format)
-        );
+        let size = self.padded_size(entry.shown_size(self.apparent));
         let size = self.paint(&size, ORANGE);
 
         let escaped = escape_name(entry.name);
@@ -106,8 +92,7 @@ impl<W: Write> Printer<W> {
 
     /// Prints the scanned path's total.
     pub fn summary(&mut self, dir: &Dir) -> io::Result<()> {
-        let total = if self.apparent { dir.size } else { dir.usage };
-        let size = format!("{:>SIZE_WIDTH$}", format_size(total, self.size_format));
+        let size = self.padded_size(dir.shown_size(self.apparent));
         writeln!(
             self.out,
             "{} {}",
@@ -119,8 +104,7 @@ impl<W: Write> Printer<W> {
     /// Lists the tree to `depth`.
     pub fn depth(&mut self, dir: &Dir, depth: u32) -> io::Result<()> {
         let root = PathBuf::from(dir.name.as_ref());
-        let total = if self.apparent { dir.size } else { dir.usage };
-        self.path_line(total, &root, true)?;
+        self.path_line(dir.shown_size(self.apparent), &root, true)?;
         self.depth_inner(dir, &root, 0, depth)
     }
 
@@ -128,9 +112,9 @@ impl<W: Write> Printer<W> {
         if current >= max {
             return Ok(());
         }
-        for entry in dir.sorted(self.sort_by(), self.order()) {
+        for entry in self.sorted(dir) {
             let child = path.join(entry.name);
-            self.path_line(self.size_of(&entry), &child, entry.is_dir())?;
+            self.path_line(entry.shown_size(self.apparent), &child, entry.is_dir())?;
             if let Some(subdir) = entry.dir {
                 self.depth_inner(subdir, &child, current + 1, max)?;
             }
@@ -151,7 +135,7 @@ impl<W: Write> Printer<W> {
     }
 
     fn path_line(&mut self, size: i64, path: &Path, is_dir: bool) -> io::Result<()> {
-        let formatted = format!("{:>SIZE_WIDTH$}", format_size(size, self.size_format));
+        let formatted = self.padded_size(size);
         let shown = escape_name(&path.to_string_lossy());
         let shown = if is_dir {
             self.paint(&shown, BLUE)
@@ -191,7 +175,7 @@ fn visit(
         match entry.dir {
             Some(subdir) => visit(subdir, &path.join(entry.name), n, apparent, heap),
             None => {
-                let size = if apparent { entry.size } else { entry.usage };
+                let size = entry.shown_size(apparent);
                 if heap.len() < n {
                     heap.push((Reverse(size), path.join(entry.name)));
                 } else if let Some((Reverse(smallest), _)) = heap.peek()

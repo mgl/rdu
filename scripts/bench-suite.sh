@@ -3,6 +3,9 @@
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/common.sh
+source "$here/scripts/common.sh"
+
 cache_mode=warm
 runs=10
 warmups=3
@@ -61,6 +64,8 @@ while (($#)); do
 			;;
 	esac
 done
+
+validate_samples "$runs" "$warmups"
 
 case "$cache_mode" in
 	warm) modes=(warm) ;;

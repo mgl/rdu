@@ -11,22 +11,30 @@ dua = "2.45.1"
 
 [tasks.build]
 description = "Build the Rust rdu binary"
-run = "cargo build --release"
+run = "cargo build --release --locked"
 
 [tasks.test]
 description = "Run the Rust test suite"
-run = "cargo test"
+run = "cargo test --locked"
 
 [tasks.lint]
 description = "Clippy with warnings denied"
-run = "cargo clippy --all-targets -- -D warnings"
+run = "cargo clippy --all-targets --locked -- -D warnings"
 
 [tasks.fmt]
 description = "Format the Rust sources"
-run = "cargo fmt"
+run = "cargo fmt --all"
+
+[tasks.fmt-check]
+description = "Check Rust source formatting"
+run = "cargo fmt --all -- --check"
+
+[tasks.scripts-check]
+description = "Lint and test the shell scripts"
+run = "shellcheck scripts/*.sh && bash scripts/test.sh"
 
 [tasks.bench]
-description = "Benchmark against diskus, du, dust, pdu, ncdu and gdu"
+description = "Benchmark against diskus, dua, du, dust, pdu, ncdu and gdu"
 run = "./scripts/bench.sh"
 
 [tasks.bench-suite]

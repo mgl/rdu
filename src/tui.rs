@@ -42,6 +42,12 @@ pub struct Child {
     pub dir_index: Option<usize>,
 }
 
+impl Child {
+    fn shown_size(&self, apparent: bool) -> i64 {
+        if apparent { self.size } else { self.usage }
+    }
+}
+
 /// Browser state.
 pub struct Model {
     tree: Dir,
@@ -98,22 +104,16 @@ impl Model {
         path
     }
 
-    fn size_of_dir(&self, dir: &Dir) -> i64 {
-        if self.apparent { dir.size } else { dir.usage }
-    }
-
     /// Sorted and filtered children.
     pub fn rows(&self) -> Vec<Child> {
         let dir = self.current();
         let needle = self.filter.to_lowercase();
-        let sort = if self.apparent && self.sort == SortBy::Usage {
-            SortBy::ApparentSize
-        } else {
-            self.sort
+        let sort = match self.sort {
+            SortBy::Usage | SortBy::ApparentSize => SortBy::size(self.apparent),
+            other => other,
         };
 
-        let rows: Vec<Child> = dir
-            .sorted(sort, self.order)
+        dir.sorted(sort, self.order)
             .into_iter()
             .filter(|entry| needle.is_empty() || entry.name.to_lowercase().contains(&needle))
             .map(|entry| Child {
@@ -124,8 +124,7 @@ impl Model {
                 flag: entry.flag,
                 dir_index: entry.dir_index,
             })
-            .collect();
-        rows
+            .collect()
     }
 
     /// Handles one key press.
@@ -189,10 +188,7 @@ impl Model {
 
     fn set_sort(&mut self, sort: SortBy) {
         if self.sort == sort {
-            self.order = match self.order {
-                Order::Descending => Order::Ascending,
-                Order::Ascending => Order::Descending,
-            };
+            self.order = self.order.reversed();
         } else {
             self.sort = sort;
             self.order = Order::Descending;
@@ -291,7 +287,7 @@ fn view(frame: &mut ratatui::Frame, model: &Model) {
 
 fn header(frame: &mut ratatui::Frame, area: Rect, model: &Model) {
     let dir = model.current();
-    let total = model.size_of_dir(dir);
+    let total = dir.shown_size(model.apparent);
     let sort = match model.sort {
         SortBy::Usage | SortBy::ApparentSize => "size",
         SortBy::Name => "name",
@@ -329,7 +325,7 @@ fn listing(frame: &mut ratatui::Frame, area: Rect, model: &Model) {
     let rows = model.rows();
     let largest = rows
         .iter()
-        .map(|row| if model.apparent { row.size } else { row.usage })
+        .map(|row| row.shown_size(model.apparent))
         .max()
         .unwrap_or(0)
         .max(1);
@@ -337,7 +333,7 @@ fn listing(frame: &mut ratatui::Frame, area: Rect, model: &Model) {
     let table_rows: Vec<Row> = rows
         .iter()
         .map(|row| {
-            let size = if model.apparent { row.size } else { row.usage };
+            let size = row.shown_size(model.apparent);
             let share = (size as f64 / largest as f64).clamp(0.0, 1.0);
             let filled = (share * BAR_WIDTH as f64).round() as usize;
 
