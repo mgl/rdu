@@ -34,7 +34,7 @@ done
 # Mock Cargo to check build arguments and failure propagation without compiling.
 (
 	# Invoked indirectly by build_release.
-	# shellcheck disable=SC2329
+	# shellcheck disable=SC2317,SC2329
 	cargo() {
 		[[ $PWD == "$here" && $# -eq 5 &&
 			$1 == build && $2 == --release && $3 == --locked &&
@@ -42,7 +42,7 @@ done
 	}
 	expect_status 0 build_release "$here"
 	expect_status 1 build_release "$here/Cargo.toml"
-	# shellcheck disable=SC2329
+	# shellcheck disable=SC2317,SC2329
 	cargo() { return 7; }
 	expect_status 7 build_release "$here"
 )
