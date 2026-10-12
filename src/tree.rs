@@ -38,6 +38,11 @@ impl Flag {
             Self::HardLink => 'H',
         }
     }
+
+    /// Whether this item or something beneath it could not be read.
+    pub fn is_incomplete(self) -> bool {
+        matches!(self, Self::Unreadable | Self::ChildUnreadable)
+    }
 }
 
 /// The measured facts about one file, as handed to its directory.
@@ -137,6 +142,11 @@ impl Entry<'_> {
     pub fn is_dir(&self) -> bool {
         self.dir.is_some()
     }
+
+    /// Apparent size or disk usage, whichever is being reported.
+    pub fn shown_size(&self, apparent: bool) -> i64 {
+        if apparent { self.size } else { self.usage }
+    }
 }
 
 /// Which field to order children by.
@@ -150,11 +160,38 @@ pub enum SortBy {
     Mtime,
 }
 
+impl SortBy {
+    /// The size ordering matching the reported size.
+    pub fn size(apparent: bool) -> Self {
+        if apparent {
+            Self::ApparentSize
+        } else {
+            Self::Usage
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Order {
     Ascending,
     #[default]
     Descending,
+}
+
+impl Order {
+    pub fn reversed(self) -> Self {
+        match self {
+            Self::Ascending => Self::Descending,
+            Self::Descending => Self::Ascending,
+        }
+    }
+
+    fn apply(self, ordering: Ordering) -> Ordering {
+        match self {
+            Self::Ascending => ordering,
+            Self::Descending => ordering.reverse(),
+        }
+    }
 }
 
 impl Dir {
@@ -178,6 +215,18 @@ impl Dir {
 
     pub fn fs_name(&self) -> &OsStr {
         &self.fs_name
+    }
+
+    /// Apparent size or disk usage, whichever is being reported.
+    pub fn shown_size(&self, apparent: bool) -> i64 {
+        if apparent { self.size } else { self.usage }
+    }
+
+    /// Records that a descendant could not be read, keeping a stronger error.
+    pub fn mark_child_unreadable(&mut self) {
+        if self.flag != Flag::Unreadable {
+            self.flag = Flag::ChildUnreadable;
+        }
     }
 
     /// Adds file statistics without storing the file.
@@ -236,11 +285,8 @@ impl Dir {
         self.items += child.items;
         self.mtime = self.mtime.max(child.mtime);
 
-        // Preserve an unreadable directory's stronger status.
-        if matches!(child.flag, Flag::Unreadable | Flag::ChildUnreadable)
-            && self.flag != Flag::Unreadable
-        {
-            self.flag = Flag::ChildUnreadable;
+        if child.flag.is_incomplete() {
+            self.mark_child_unreadable();
         }
     }
 
@@ -304,13 +350,7 @@ impl Dir {
     /// Children in display order.
     pub fn sorted(&self, by: SortBy, order: Order) -> Vec<Entry<'_>> {
         let mut entries: Vec<_> = self.entries().collect();
-        entries.sort_by(|a, b| {
-            let ordering = compare(a, b, by);
-            match order {
-                Order::Ascending => ordering,
-                Order::Descending => ordering.reverse(),
-            }
-        });
+        entries.sort_by(|a, b| order.apply(compare(a, b, by)));
         entries
     }
 }
@@ -330,6 +370,41 @@ fn compare(a: &Entry<'_>, b: &Entry<'_>, by: SortBy) -> Ordering {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn display_helpers_select_the_same_size_and_order() {
+        let mut dir = Dir::new("root");
+        dir.push_file("sparse", FileStats::plain(8192, 0, 0));
+        dir.push_file("allocated", FileStats::plain(1024, 4096, 0));
+        for (apparent, total, first) in [(false, 4096, "allocated"), (true, 9216, "sparse")] {
+            assert_eq!(dir.shown_size(apparent), total);
+            let entries = dir.sorted(SortBy::size(apparent), Order::Descending);
+            assert_eq!(entries[0].name, first);
+            assert_eq!(
+                entries.iter().map(|e| e.shown_size(apparent)).sum::<i64>(),
+                total
+            );
+        }
+        assert_eq!(Order::Ascending.reversed(), Order::Descending);
+        assert_eq!(Order::Descending.reversed(), Order::Ascending);
+    }
+
+    #[test]
+    fn only_read_errors_mark_a_tree_incomplete() {
+        for flag in [
+            Flag::Ok,
+            Flag::Empty,
+            Flag::NotRegular,
+            Flag::HardLink,
+            Flag::Unreadable,
+            Flag::ChildUnreadable,
+        ] {
+            assert_eq!(
+                flag.is_incomplete(),
+                matches!(flag, Flag::Unreadable | Flag::ChildUnreadable)
+            );
+        }
+    }
 
     fn dir_with_two_files() -> Dir {
         let mut dir = Dir::new("root");

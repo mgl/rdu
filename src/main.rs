@@ -208,16 +208,14 @@ fn run(cli: &Cli) -> Fallible {
             Some(spec) => report::Attributes::parse(spec)?,
             None => report::Attributes::default(),
         };
-        let timestamp = jiff::Timestamp::now().as_second();
-        let version = env!("CARGO_PKG_VERSION");
-
         if destination == "-" {
-            report::export(&tree, &mut out, attributes, version, timestamp)?;
-            out.flush()?;
+            write_report(&tree, &mut out, attributes)?;
         } else {
-            let mut file = BufWriter::new(File::create(destination)?);
-            report::export(&tree, &mut file, attributes, version, timestamp)?;
-            file.flush()?;
+            write_report(
+                &tree,
+                BufWriter::new(File::create(destination)?),
+                attributes,
+            )?;
         }
         return ensure_complete(tree.flag);
     }
@@ -238,8 +236,24 @@ fn run(cli: &Cli) -> Fallible {
     ensure_complete(tree.flag)
 }
 
+fn write_report(
+    tree: &tree::Dir,
+    mut writer: impl Write,
+    attributes: report::Attributes,
+) -> io::Result<()> {
+    let timestamp = jiff::Timestamp::now().as_second();
+    report::export(
+        tree,
+        &mut writer,
+        attributes,
+        env!("CARGO_PKG_VERSION"),
+        timestamp,
+    )?;
+    writer.flush()
+}
+
 fn ensure_complete(flag: tree::Flag) -> Fallible {
-    if matches!(flag, tree::Flag::Unreadable | tree::Flag::ChildUnreadable) {
+    if flag.is_incomplete() {
         Err(io::Error::other("scan incomplete: unreadable paths were skipped").into())
     } else {
         Ok(())
@@ -256,14 +270,7 @@ fn analyze(cli: &Cli) -> Result<tree::Dir, Box<dyn Error>> {
         one_filesystem: cli.no_cross,
     };
 
-    let threads = match (cli.sequential, cli.max_cores) {
-        (true, _) => 1,
-        (_, Some(cores)) => cores.max(1),
-        // Metadata walks benefit from several lookups in flight per core.
-        _ => std::thread::available_parallelism()
-            .map_or(1, |cores| cores.get().saturating_mul(4).min(64)),
-    };
-
+    let threads = worker_count(cli);
     let show_progress = !cli.no_progress && io::stderr().is_terminal();
     let progress = Progress::new(show_progress);
 
@@ -279,6 +286,16 @@ fn analyze(cli: &Cli) -> Result<tree::Dir, Box<dyn Error>> {
     })?;
 
     Ok(tree)
+}
+
+fn worker_count(cli: &Cli) -> usize {
+    match (cli.sequential, cli.max_cores) {
+        (true, _) => 1,
+        (_, Some(cores)) => cores.max(1),
+        // Metadata walks benefit from several lookups in flight per core.
+        _ => std::thread::available_parallelism()
+            .map_or(1, |cores| cores.get().saturating_mul(4).min(64)),
+    }
 }
 
 /// Returns the storage depth needed by the selected output.
@@ -412,5 +429,52 @@ mod tests {
         let mut tree = tree::Dir::new("/tmp/root");
         tree.flag = tree::Flag::ChildUnreadable;
         assert!(ensure_complete(tree.flag).is_err());
+    }
+
+    #[test]
+    fn explicit_worker_counts_preserve_the_single_worker_floor() {
+        for (args, expected) in [
+            (vec!["rdu", "--sequential"], 1),
+            (vec!["rdu", "--max-cores", "0"], 1),
+            (vec!["rdu", "--max-cores", "8"], 8),
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            assert_eq!(worker_count(&cli), expected);
+        }
+    }
+
+    #[test]
+    fn storage_depth_matches_the_output_layout() {
+        for (args, expected) in [
+            (vec!["rdu", "-n"], Some(1)),
+            (vec!["rdu", "-n", "--summarize"], Some(0)),
+            (vec!["rdu", "-n", "--depth", "3"], Some(3)),
+            (vec!["rdu", "-n", "--top", "0"], None),
+            (vec!["rdu", "-o", "-"], None),
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            assert_eq!(depth_cap(&cli), expected);
+        }
+    }
+
+    #[test]
+    fn writing_a_report_propagates_flush_errors() {
+        struct FlushError;
+        impl Write for FlushError {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Err(io::Error::other("flush failed"))
+            }
+        }
+        let error = write_report(
+            &tree::Dir::new("root"),
+            FlushError,
+            report::Attributes::default(),
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "flush failed");
     }
 }

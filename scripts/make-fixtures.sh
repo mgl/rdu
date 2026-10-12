@@ -37,6 +37,8 @@ names "$flat" 1000000 7 | xargs -0 -r -P "$jobs" -n 256 touch --
 
 echo "creating wide-400k (100,000 directories x 4 files)..." >&2
 mkdir "$wide"
+# Variables in the child script are expanded by sh, not by this shell.
+# shellcheck disable=SC2016
 seq 0 99999 |
 	awk -v directory="$wide" '{ printf "%s/dir%05d%c", directory, $1, 0 }' |
 	xargs -0 -r -P "$jobs" -n 32 sh -c '

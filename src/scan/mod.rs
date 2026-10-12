@@ -104,6 +104,18 @@ impl Progress {
         self.enabled
     }
 
+    fn add_items(&self, count: usize) {
+        if self.enabled {
+            self.items.fetch_add(count as i64, Ordering::Relaxed);
+        }
+    }
+
+    fn add_usage(&self, stats: FileStats) {
+        if self.enabled && stats.counted {
+            self.usage.fetch_add(stats.usage, Ordering::Relaxed);
+        }
+    }
+
     fn reset(&self) {
         self.items.store(0, Ordering::Relaxed);
         self.usage.store(0, Ordering::Relaxed);
@@ -189,9 +201,13 @@ impl Listing {
         });
     }
 
-    fn name(&self, entry: &RawEntry) -> &OsStr {
+    fn bytes(&self, entry: &RawEntry) -> &[u8] {
         let start = entry.name_start as usize;
-        OsStr::from_bytes(&self.names[start..start + usize::from(entry.name_len)])
+        &self.names[start..start + usize::from(entry.name_len)]
+    }
+
+    fn name(&self, entry: &RawEntry) -> &OsStr {
+        OsStr::from_bytes(self.bytes(entry))
     }
 
     fn c_name(&self, entry: &RawEntry) -> &CStr {
@@ -229,6 +245,59 @@ impl Outcome {
         Self::Totals {
             totals: Summary::default(),
             unreadable: false,
+        }
+    }
+
+    /// Converts a finished directory to its parent's result.
+    fn subtree(dir: Dir, stored: bool) -> Self {
+        if stored {
+            Self::Subtree(Box::new(dir))
+        } else {
+            Self::Totals {
+                totals: dir.summary(),
+                unreadable: false,
+            }
+        }
+    }
+}
+
+/// Files resolved by one task, kept or reduced to totals.
+struct Collected {
+    store: bool,
+    files: Vec<(u32, FileStats)>,
+    totals: Dir,
+    unreadable: bool,
+}
+
+impl Collected {
+    fn new(store: bool, capacity: usize) -> Self {
+        Self {
+            store,
+            files: Vec::with_capacity(if store { capacity } else { 0 }),
+            totals: Dir::default(),
+            unreadable: false,
+        }
+    }
+
+    fn file(&mut self, index: u32, stats: FileStats) {
+        if self.store {
+            self.files.push((index, stats));
+        } else {
+            self.totals.account_file(stats);
+        }
+    }
+
+    fn into_outcome(self) -> Outcome {
+        if self.store {
+            Outcome::Files {
+                files: self.files,
+                unreadable: self.unreadable,
+            }
+        } else {
+            Outcome::Totals {
+                totals: self.totals.summary(),
+                unreadable: self.unreadable,
+            }
         }
     }
 }
@@ -330,12 +399,7 @@ fn run_once(
     workers: usize,
 ) -> io::Result<(Dir, bool)> {
     let dirfd = open_dir(rustix::fs::CWD, root, options.follow_symlinks)?;
-    let stat = rustix::fs::statx(
-        &dirfd,
-        "",
-        AtFlags::EMPTY_PATH | AtFlags::STATX_DONT_SYNC,
-        DIR_STATX_MASK,
-    )?;
+    let stat = stat_dir(&dirfd)?;
 
     let walk = Walk {
         filters,
@@ -372,7 +436,7 @@ impl Walk<'_> {
     fn execute(&self, task: Task, spawner: &Spawner<'_, Task>) {
         match task {
             Task::Root(start) => {
-                self.open_node(start.dirfd, start.seed, start.path, 0, None, 0, spawner);
+                self.open_node(start.dirfd, start.seed, start.path, None, spawner);
             }
             Task::Dir {
                 parent,
@@ -396,10 +460,18 @@ impl Walk<'_> {
         }
     }
 
-    fn require_file_deterministic_retry(&self) {
-        if self.options.depth_cap != Some(0) && !self.duplicate_links.load(Ordering::Relaxed) {
+    /// Requests a deterministic sequential rescan after a shared inode was seen.
+    fn note_duplicate(&self) {
+        if !self.duplicate_links.load(Ordering::Relaxed) {
             self.duplicate_links.store(true, Ordering::Relaxed);
         }
+    }
+
+    fn skips_file(&self, listing: &Listing, entry: &RawEntry) -> bool {
+        self.filters.has_file_filter()
+            && self
+                .filters
+                .skip_file(&listing.name(entry).to_string_lossy())
     }
 
     /// Opens a known subdirectory and turns it into a node.
@@ -424,45 +496,32 @@ impl Walk<'_> {
         let named = parent.store;
         let child_fd = match open_dir(parent.dirfd.as_fd(), parent.listing.c_name(entry), false) {
             Ok(fd) => fd,
-            Err(err) if err.raw_os_error() == Some(rustix::io::Errno::NOENT.raw_os_error()) => {
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
                 return self.absent(parent, slot);
             }
             Err(_) => return self.unreadable(parent, slot, name, named),
         };
 
-        let stat = match rustix::fs::statx(
-            &child_fd,
-            "",
-            AtFlags::EMPTY_PATH | AtFlags::STATX_DONT_SYNC,
-            DIR_STATX_MASK,
-        ) {
+        let stat = match stat_dir(&child_fd) {
             Ok(stat) => stat,
-            Err(rustix::io::Errno::NOENT) => return self.absent(parent, slot),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return self.absent(parent, slot),
             Err(_) => return self.unreadable(parent, slot, name, named),
         };
         if self.options.one_filesystem && device_of(&stat) != self.root_device {
             return self.absent(parent, slot);
         }
         if !self.visited_dirs.insert(device_of(&stat), stat.stx_ino) {
-            if !self.duplicate_links.load(Ordering::Relaxed) {
-                self.duplicate_links.store(true, Ordering::Relaxed);
-            }
+            self.note_duplicate();
             return self.absent(parent, slot);
         }
 
-        let mut seed = if named {
-            Dir::new(name)
-        } else {
-            Dir::aggregate()
-        };
+        let mut seed = seed_dir(name, named);
         seed.mtime = stat.stx_mtime.tv_sec;
         self.open_node(
             child_fd,
             seed,
             child_path,
-            parent.depth + 1,
-            Some(parent.clone()),
-            slot,
+            Some((parent.clone(), slot)),
             spawner,
         );
     }
@@ -479,22 +538,9 @@ impl Walk<'_> {
         match self.resolve_candidate(&parent.dirfd, &parent.listing, entry) {
             ResolvedEntry::Directory => self.enter_dir(parent, index, slot, spawner),
             ResolvedEntry::File(meta) => {
-                let stats = self.finish_file(meta);
-                self.record_progress(stats);
-                let outcome = if parent.store {
-                    Outcome::Files {
-                        files: vec![(index, stats)],
-                        unreadable: false,
-                    }
-                } else {
-                    let mut totals = Dir::default();
-                    totals.account_file(stats);
-                    Outcome::Totals {
-                        totals: totals.summary(),
-                        unreadable: false,
-                    }
-                };
-                self.deliver(parent.clone(), slot, outcome);
+                let mut collected = Collected::new(parent.store, 1);
+                collected.file(index, self.finish_file(meta));
+                self.deliver(parent.clone(), slot, collected.into_outcome());
             }
             ResolvedEntry::ChildUnreadable => self.deliver(
                 parent.clone(),
@@ -509,15 +555,12 @@ impl Walk<'_> {
     }
 
     /// Reads a directory, publishes its work, and returns without waiting.
-    #[allow(clippy::too_many_arguments)]
     fn open_node(
         &self,
         dirfd: OwnedFd,
         mut seed: Dir,
         path: Option<PathBuf>,
-        depth: u32,
-        parent: Option<Arc<Node>>,
-        slot: usize,
+        parent: Option<(Arc<Node>, usize)>,
         spawner: &Spawner<'_, Task>,
     ) {
         if let Some(path) = path.as_deref() {
@@ -527,12 +570,13 @@ impl Walk<'_> {
         let Ok(listing) = read_listing(&dirfd) else {
             seed.flag = Flag::Unreadable;
             seed.finish(0);
-            return self.publish(parent, slot, seed);
+            return self.publish(parent, seed);
         };
 
+        let depth = parent.as_ref().map_or(0, |(node, _)| node.depth + 1);
         let store = self.stores(depth);
-        let has_file_filter = self.filters.has_file_filter();
-        let aggregate_only = !store && !has_file_filter && self.options.depth_cap == Some(0);
+        let aggregate_only =
+            !store && !self.filters.has_file_filter() && self.options.depth_cap == Some(0);
         let child_count = listing.entries.len();
 
         let mut subdirs: Entries = SmallVec::new();
@@ -544,41 +588,28 @@ impl Walk<'_> {
                 FileType::Directory => subdirs.push(index),
                 FileType::Unknown => untyped.push(index),
                 _ if aggregate_only => {}
-                _ => {
-                    if !has_file_filter
-                        || !self
-                            .filters
-                            .skip_file(&listing.name(entry).to_string_lossy())
-                    {
-                        candidates.push(index);
-                    }
-                }
+                _ if self.skips_file(&listing, entry) => {}
+                _ => candidates.push(index),
             }
         }
         if !self.parallel && self.options.depth_cap != Some(0) {
             let by_name = |a: &u32, b: &u32| {
                 listing
-                    .at(*a)
-                    .name_bytes(&listing)
-                    .cmp(listing.at(*b).name_bytes(&listing))
+                    .bytes(listing.at(*a))
+                    .cmp(listing.bytes(listing.at(*b)))
             };
             candidates.sort_unstable_by(by_name);
             subdirs.sort_unstable_by(by_name);
         }
 
+        let span = inline_span(&listing, &candidates, aggregate_only);
         let inline_count = if aggregate_only {
             child_count - subdirs.len() - untyped.len()
         } else {
-            candidates.len()
+            span
         };
-        let chunked = self.parallel && inline_count >= STAT_PARALLEL_THRESHOLD;
-        let chunk_span = if aggregate_only {
-            child_count
-        } else {
-            candidates.len()
-        };
-        let chunks = if chunked {
-            chunk_span.div_ceil(STAT_CHUNK)
+        let chunks = if self.parallel && inline_count >= STAT_PARALLEL_THRESHOLD {
+            span.div_ceil(STAT_CHUNK)
         } else {
             0
         };
@@ -593,18 +624,15 @@ impl Walk<'_> {
                 store,
                 &mut seed,
             );
-            if self.progress.enabled() {
-                self.progress
-                    .items
-                    .fetch_add(child_count as i64, Ordering::Relaxed);
-            }
+            self.progress.add_items(child_count);
             seed.finish(child_count);
-            return self.publish(parent, slot, seed);
+            return self.publish(parent, seed);
         }
 
+        let (parent, slot) = parent.unzip();
         let node = Arc::new(Node {
             parent,
-            slot,
+            slot: slot.unwrap_or(0),
             depth,
             store,
             dirfd,
@@ -618,7 +646,7 @@ impl Walk<'_> {
             results: (0..total).map(|_| UnsafeCell::new(None)).collect(),
         });
 
-        if !chunked {
+        if chunks == 0 {
             // SAFETY: no task references this node yet.
             let dir = unsafe { &mut *node.seed.get() };
             self.stat_inline(
@@ -651,13 +679,13 @@ impl Walk<'_> {
             spawner.push(Task::Chunk {
                 node: node.clone(),
                 start: start as u32,
-                end: (start + STAT_CHUNK).min(chunk_span) as u32,
+                end: (start + STAT_CHUNK).min(span) as u32,
                 slot: (chunk_base + chunk) as u32,
             });
         }
     }
 
-    /// Stats entries kept by this worker.
+    /// Stats the entries this worker keeps directly in `dir`.
     fn stat_inline(
         &self,
         dirfd: &OwnedFd,
@@ -667,94 +695,42 @@ impl Walk<'_> {
         store: bool,
         dir: &mut Dir,
     ) {
-        if aggregate_only {
-            for entry in &listing.entries {
-                if entry.kind != FileType::Directory && entry.kind != FileType::Unknown {
-                    self.apply(dirfd, listing, store, dir, entry, None);
+        let span = inline_span(listing, candidates, aggregate_only);
+        for_each_inline(
+            listing,
+            candidates,
+            aggregate_only,
+            0..span,
+            |_, entry| match self.resolve_candidate(dirfd, listing, entry) {
+                ResolvedEntry::File(meta) => {
+                    let stats = self.finish_file(meta);
+                    if store {
+                        dir.push_file(listing.name(entry), stats);
+                    } else {
+                        dir.account_file(stats);
+                    }
                 }
-            }
-        } else {
-            for &index in candidates {
-                self.apply(dirfd, listing, store, dir, listing.at(index), Some(index));
-            }
-        }
-    }
-
-    /// Resolves one entry.
-    fn apply(
-        &self,
-        dirfd: &OwnedFd,
-        listing: &Listing,
-        store: bool,
-        dir: &mut Dir,
-        entry: &RawEntry,
-        index: Option<u32>,
-    ) {
-        match self.resolve_candidate(dirfd, listing, entry) {
-            ResolvedEntry::File(meta) => {
-                let stats = self.finish_file(meta);
-                self.record_progress(stats);
-                match index.filter(|_| store) {
-                    Some(index) => dir.push_file(listing.name(listing.at(index)), stats),
-                    None => dir.account_file(stats),
-                }
-            }
-            ResolvedEntry::Directory | ResolvedEntry::Skip => {}
-            ResolvedEntry::ChildUnreadable => {
-                if dir.flag != Flag::Unreadable {
-                    dir.flag = Flag::ChildUnreadable;
-                }
-            }
-        }
+                ResolvedEntry::ChildUnreadable => dir.mark_child_unreadable(),
+                ResolvedEntry::Directory | ResolvedEntry::Skip => {}
+            },
+        );
     }
 
     /// Stats one entry chunk.
     fn stat_chunk(&self, node: &Node, start: u32, end: u32) -> Outcome {
-        let mut files = Vec::new();
-        let mut totals = Dir::default();
-        let mut unreadable = false;
-        if node.store {
-            files.reserve((end - start) as usize);
-        }
-
-        let mut resolve = |index: u32, entry: &RawEntry| match self.resolve_candidate(
-            &node.dirfd,
+        let mut collected = Collected::new(node.store, (end - start) as usize);
+        for_each_inline(
             &node.listing,
-            entry,
-        ) {
-            ResolvedEntry::File(meta) => {
-                let stats = self.finish_file(meta);
-                self.record_progress(stats);
-                if node.store {
-                    files.push((index, stats));
-                } else {
-                    totals.account_file(stats);
-                }
-            }
-            ResolvedEntry::Directory | ResolvedEntry::Skip => {}
-            ResolvedEntry::ChildUnreadable => unreadable = true,
-        };
-
-        if node.aggregate_only {
-            for entry in &node.listing.entries[start as usize..end as usize] {
-                if entry.kind != FileType::Directory && entry.kind != FileType::Unknown {
-                    resolve(0, entry);
-                }
-            }
-        } else {
-            for &index in &node.candidates[start as usize..end as usize] {
-                resolve(index, node.listing.at(index));
-            }
-        }
-
-        if node.store {
-            Outcome::Files { files, unreadable }
-        } else {
-            Outcome::Totals {
-                totals: totals.summary(),
-                unreadable,
-            }
-        }
+            &node.candidates,
+            node.aggregate_only,
+            start as usize..end as usize,
+            |index, entry| match self.resolve_candidate(&node.dirfd, &node.listing, entry) {
+                ResolvedEntry::File(meta) => collected.file(index, self.finish_file(meta)),
+                ResolvedEntry::ChildUnreadable => collected.unreadable = true,
+                ResolvedEntry::Directory | ResolvedEntry::Skip => {}
+            },
+        );
+        collected.into_outcome()
     }
 
     /// Reports an empty result slot.
@@ -764,115 +740,84 @@ impl Walk<'_> {
 
     /// Reports an unreadable subdirectory.
     fn unreadable(&self, parent: &Arc<Node>, slot: usize, name: &OsStr, named: bool) {
-        let mut stub = if named {
-            Dir::new(name)
-        } else {
-            Dir::aggregate()
-        };
+        let mut stub = seed_dir(name, named);
         stub.flag = Flag::Unreadable;
         stub.finish(0);
-        let outcome = Self::hand_up(stub, parent.store);
-        self.deliver(parent.clone(), slot, outcome);
+        self.deliver(parent.clone(), slot, Outcome::subtree(stub, parent.store));
     }
 
-    /// Converts a finished directory to its parent result.
-    fn hand_up(dir: Dir, stored: bool) -> Outcome {
-        if stored {
-            Outcome::Subtree(Box::new(dir))
-        } else {
-            Outcome::Totals {
-                totals: dir.summary(),
-                unreadable: false,
-            }
-        }
-    }
-
-    /// Publishes a finished directory.
-    fn publish(&self, parent: Option<Arc<Node>>, slot: usize, dir: Dir) {
+    /// Publishes a finished directory to its parent, or as the scan result.
+    fn publish(&self, parent: Option<(Arc<Node>, usize)>, dir: Dir) {
         match parent {
-            Some(parent) => {
-                let outcome = Self::hand_up(dir, parent.store);
+            Some((parent, slot)) => {
+                let outcome = Outcome::subtree(dir, parent.store);
                 self.deliver(parent, slot, outcome);
             }
-            None => *self.root.lock().expect("root result") = Some(dir),
+            None => self.set_root(dir),
         }
     }
 
-    /// Fills a result slot and completes ancestors when possible.
-    fn deliver(&self, node: Arc<Node>, slot: usize, outcome: Outcome) {
-        // SAFETY: this task owns `slot`; readers wait for `pending` to reach 0.
-        unsafe { *node.results[slot].get() = Some(outcome) };
-        if node.pending.fetch_sub(1, Ordering::AcqRel) == 1 {
-            self.finish(node);
-        }
+    fn set_root(&self, dir: Dir) {
+        *self.root.lock().expect("root result") = Some(dir);
     }
 
-    /// Folds a completed directory up the tree.
-    fn finish(&self, node: Arc<Node>) {
-        let mut node = node;
+    /// Fills a result slot, then folds every directory it completes up the tree.
+    fn deliver(&self, mut node: Arc<Node>, mut slot: usize, mut outcome: Outcome) {
         loop {
-            // SAFETY: `pending` is zero, so child writes are complete.
-            let mut dir = unsafe { std::mem::take(&mut *node.seed.get()) };
-            let mut unreadable = false;
-            for cell in &node.results {
-                match unsafe { (*cell.get()).take() } {
-                    None => {}
-                    Some(Outcome::Subtree(child)) => dir.push_dir(*child),
-                    Some(Outcome::Totals {
-                        totals,
-                        unreadable: bad,
-                    }) => {
-                        unreadable |= bad;
-                        dir.account(&totals);
-                    }
-                    Some(Outcome::Files {
-                        files,
-                        unreadable: bad,
-                    }) => {
-                        unreadable |= bad;
-                        for (index, stats) in files {
-                            dir.push_file(node.listing.name(node.listing.at(index)), stats);
-                        }
-                    }
-                }
+            // SAFETY: this task owns `slot`; readers wait for `pending` to reach 0.
+            unsafe { *node.results[slot].get() = Some(outcome) };
+            if node.pending.fetch_sub(1, Ordering::AcqRel) != 1 {
+                return;
             }
-            if unreadable && dir.flag != Flag::Unreadable {
-                dir.flag = Flag::ChildUnreadable;
-            }
-            if self.progress.enabled() {
-                self.progress
-                    .items
-                    .fetch_add(node.child_count as i64, Ordering::Relaxed);
-            }
-            dir.finish(node.child_count);
 
+            let dir = self.complete(&node);
             let Some(parent) = node.parent.clone() else {
-                *self.root.lock().expect("root result") = Some(dir);
-                return;
+                return self.set_root(dir);
             };
-            let slot = node.slot;
-            drop(node);
-
-            let outcome = Self::hand_up(dir, parent.store);
-            // SAFETY: this task owns the parent's slot.
-            unsafe { *parent.results[slot].get() = Some(outcome) };
-            if parent.pending.fetch_sub(1, Ordering::AcqRel) != 1 {
-                return;
-            }
+            slot = node.slot;
+            outcome = Outcome::subtree(dir, parent.store);
             node = parent;
         }
     }
 
-    fn stores(&self, depth: u32) -> bool {
-        self.options.depth_cap.is_none_or(|cap| depth < cap)
+    /// Merges a node's child results once all of them have arrived.
+    fn complete(&self, node: &Node) -> Dir {
+        // SAFETY: `pending` is zero, so child writes are complete.
+        let mut dir = unsafe { std::mem::take(&mut *node.seed.get()) };
+        let mut unreadable = false;
+        for cell in &node.results {
+            // SAFETY: as above; no other task touches the slots any more.
+            match unsafe { (*cell.get()).take() } {
+                None => {}
+                Some(Outcome::Subtree(child)) => dir.push_dir(*child),
+                Some(Outcome::Totals {
+                    totals,
+                    unreadable: bad,
+                }) => {
+                    unreadable |= bad;
+                    dir.account(&totals);
+                }
+                Some(Outcome::Files {
+                    files,
+                    unreadable: bad,
+                }) => {
+                    unreadable |= bad;
+                    for (index, stats) in files {
+                        dir.push_file(node.listing.name(node.listing.at(index)), stats);
+                    }
+                }
+            }
+        }
+        if unreadable {
+            dir.mark_child_unreadable();
+        }
+        self.progress.add_items(node.child_count);
+        dir.finish(node.child_count);
+        dir
     }
 
-    fn record_progress(&self, stats: FileStats) {
-        if stats.counted && self.progress.enabled() {
-            self.progress
-                .usage
-                .fetch_add(stats.usage, Ordering::Relaxed);
-        }
+    fn stores(&self, depth: u32) -> bool {
+        self.options.depth_cap.is_none_or(|cap| depth < cap)
     }
 
     fn resolve_candidate(
@@ -881,41 +826,38 @@ impl Walk<'_> {
         listing: &Listing,
         entry: &RawEntry,
     ) -> ResolvedEntry {
-        let lstat_flags = AtFlags::SYMLINK_NOFOLLOW | AtFlags::STATX_DONT_SYNC;
-        let lstat = match rustix::fs::statx(dirfd, listing.c_name(entry), lstat_flags, STATX_MASK) {
-            Ok(stat) => stat,
-            Err(rustix::io::Errno::NOENT) => return ResolvedEntry::Skip,
-            Err(_) => return ResolvedEntry::ChildUnreadable,
-        };
-        let is_symlink = FileType::from_raw_mode(lstat.stx_mode.into()) == FileType::Symlink;
-        let stat = if self.options.follow_symlinks && is_symlink {
-            let target = match rustix::fs::statx(
+        let stat_at = |flags: AtFlags| {
+            rustix::fs::statx(
                 dirfd,
                 listing.c_name(entry),
-                AtFlags::STATX_DONT_SYNC,
+                flags | AtFlags::STATX_DONT_SYNC,
                 STATX_MASK,
-            ) {
-                Ok(stat) => stat,
-                Err(rustix::io::Errno::NOENT) => return ResolvedEntry::Skip,
-                Err(_) => return ResolvedEntry::ChildUnreadable,
-            };
-            if FileType::from_raw_mode(target.stx_mode.into()) == FileType::Directory {
-                lstat
-            } else {
-                target
+            )
+            .map_err(|err| match err {
+                rustix::io::Errno::NOENT => ResolvedEntry::Skip,
+                _ => ResolvedEntry::ChildUnreadable,
+            })
+        };
+
+        let lstat = match stat_at(AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(stat) => stat,
+            Err(resolved) => return resolved,
+        };
+        let stat = if self.options.follow_symlinks && file_type(&lstat) == FileType::Symlink {
+            match stat_at(AtFlags::empty()) {
+                // Directory symlinks are measured as links, never followed.
+                Ok(target) if file_type(&target) == FileType::Directory => lstat,
+                Ok(target) => target,
+                Err(resolved) => return resolved,
             }
         } else {
             lstat
         };
-        if FileType::from_raw_mode(stat.stx_mode.into()) == FileType::Directory {
+
+        if file_type(&stat) == FileType::Directory {
             return ResolvedEntry::Directory;
         }
-        if entry.kind == FileType::Unknown
-            && self.filters.has_file_filter()
-            && self
-                .filters
-                .skip_file(&listing.name(entry).to_string_lossy())
-        {
+        if entry.kind == FileType::Unknown && self.skips_file(listing, entry) {
             return ResolvedEntry::Skip;
         }
         if self.options.one_filesystem && device_of(&stat) != self.root_device {
@@ -939,7 +881,7 @@ impl Walk<'_> {
             stat.stx_blocks as i64 * BLOCK_SIZE,
             stat.stx_mtime.tv_sec,
         );
-        if FileType::from_raw_mode(stat.stx_mode.into()) != FileType::RegularFile {
+        if file_type(stat) != FileType::RegularFile {
             stats = stats.with_flag(Flag::NotRegular);
         }
 
@@ -952,22 +894,83 @@ impl Walk<'_> {
         })
     }
 
+    /// Charges each hard-linked inode once and records progress.
     fn finish_file(&self, mut meta: FileMeta) -> FileStats {
-        // Count each hard-linked inode once.
         if meta.deduplicate && !self.links.insert(meta.device, meta.inode) {
-            self.require_file_deterministic_retry();
+            // Summaries do not depend on which name owns the inode.
+            if self.options.depth_cap != Some(0) {
+                self.note_duplicate();
+            }
             meta.stats = meta.stats.with_flag(Flag::HardLink);
             meta.stats.counted = false;
         }
+        self.progress.add_usage(meta.stats);
         meta.stats
     }
 }
 
 impl RawEntry {
-    fn name_bytes<'a>(&self, listing: &'a Listing) -> &'a [u8] {
-        let start = self.name_start as usize;
-        &listing.names[start..start + usize::from(self.name_len)]
+    /// Whether the entry is statted by its directory rather than its own task.
+    fn is_typed_file(&self) -> bool {
+        !matches!(self.kind, FileType::Directory | FileType::Unknown)
     }
+}
+
+/// Number of positions a node's inline work ranges over.
+fn inline_span(listing: &Listing, candidates: &[u32], aggregate_only: bool) -> usize {
+    if aggregate_only {
+        listing.entries.len()
+    } else {
+        candidates.len()
+    }
+}
+
+/// Visits the inline entries within `range` of a node's inline span.
+///
+/// Aggregate-only nodes range over the whole listing, skipping directories and
+/// untyped entries; other nodes range over their filtered candidates.
+fn for_each_inline(
+    listing: &Listing,
+    candidates: &[u32],
+    aggregate_only: bool,
+    range: std::ops::Range<usize>,
+    mut visit: impl FnMut(u32, &RawEntry),
+) {
+    if aggregate_only {
+        let start = range.start;
+        for (offset, entry) in listing.entries[range].iter().enumerate() {
+            if entry.is_typed_file() {
+                visit((start + offset) as u32, entry);
+            }
+        }
+    } else {
+        for &index in &candidates[range] {
+            visit(index, listing.at(index));
+        }
+    }
+}
+
+/// A directory result: named when it is stored, otherwise a bare aggregate.
+fn seed_dir(name: &OsStr, named: bool) -> Dir {
+    if named {
+        Dir::new(name)
+    } else {
+        Dir::aggregate()
+    }
+}
+
+fn stat_dir(dirfd: &OwnedFd) -> io::Result<Statx> {
+    rustix::fs::statx(
+        dirfd,
+        "",
+        AtFlags::EMPTY_PATH | AtFlags::STATX_DONT_SYNC,
+        DIR_STATX_MASK,
+    )
+    .map_err(Into::into)
+}
+
+fn file_type(stat: &Statx) -> FileType {
+    FileType::from_raw_mode(stat.stx_mode.into())
 }
 
 fn open_dir(
@@ -1013,6 +1016,69 @@ mod tests {
     use std::os::unix::fs as unix_fs;
 
     use tempfile::TempDir;
+
+    #[test]
+    fn inline_ranges_preserve_indices_and_skip_separate_tasks() {
+        let mut listing = Listing::default();
+        listing.push(b"file0", FileType::RegularFile);
+        listing.push(b"directory", FileType::Directory);
+        listing.push(b"unknown", FileType::Unknown);
+        listing.push(b"file3", FileType::RegularFile);
+        listing.push(b"link", FileType::Symlink);
+        let candidates = [4, 0, 3];
+
+        for (aggregate, expected) in [(false, vec![0, 3]), (true, vec![3, 4])] {
+            let mut indices = Vec::new();
+            let span = inline_span(&listing, &candidates, aggregate);
+            for_each_inline(&listing, &candidates, aggregate, 1..span, |index, entry| {
+                assert!(std::ptr::eq(entry, listing.at(index)));
+                indices.push(index);
+            });
+            assert_eq!(indices, expected);
+        }
+    }
+
+    #[test]
+    fn collected_files_have_identical_totals_in_both_storage_modes() {
+        let mut stored = Collected::new(true, 2);
+        let mut aggregate = Collected::new(false, 2);
+        let plain = FileStats::plain(1024, 4096, 10);
+        let duplicate = FileStats {
+            counted: false,
+            ..plain.with_flag(Flag::HardLink)
+        };
+        for (index, stats) in [(3, plain), (4, duplicate)] {
+            stored.file(index, stats);
+            aggregate.file(index, stats);
+        }
+        stored.unreadable = true;
+        aggregate.unreadable = true;
+
+        let Outcome::Files { files, unreadable } = stored.into_outcome() else {
+            panic!("stored entries must stay files");
+        };
+        assert!(unreadable);
+        assert_eq!(
+            files.iter().map(|(index, _)| *index).collect::<Vec<_>>(),
+            [3, 4]
+        );
+        let mut expected = Dir::default();
+        for (_, stats) in files {
+            expected.account_file(stats);
+        }
+        let Outcome::Totals { totals, unreadable } = aggregate.into_outcome() else {
+            panic!("unstored entries must be reduced to totals");
+        };
+        assert!(unreadable);
+        assert_eq!(
+            (totals.size, totals.usage, totals.items, totals.mtime),
+            (1024, 4096, 2, 10)
+        );
+        assert_eq!(totals.size, expected.size);
+        assert_eq!(totals.usage, expected.usage);
+        assert_eq!(totals.items, expected.items);
+        assert_eq!(totals.mtime, expected.mtime);
+    }
 
     /// ```text
     /// root/
@@ -1172,6 +1238,50 @@ mod tests {
         assert_eq!(full.usage, capped.usage);
         assert_eq!(full.entries().count(), STAT_PARALLEL_THRESHOLD + 1);
         assert_eq!(capped.entries().count(), 0);
+    }
+
+    #[test]
+    fn chunked_mixed_listings_match_sequential_totals_at_every_storage_depth() {
+        let root = TempDir::new().unwrap();
+        for index in 0..STAT_CHUNK * 2 + 1 {
+            fs::write(root.path().join(format!("file{index}.txt")), [1]).unwrap();
+        }
+        fs::create_dir(root.path().join("nested")).unwrap();
+        fs::write(root.path().join("nested/child.txt"), [1, 2]).unwrap();
+        unix_fs::symlink("file0.txt", root.path().join("link")).unwrap();
+        let mut filtered = Filters::default();
+        filtered.types(Some(crate::filter::TypeFilter::Only(vec!["txt".into()])));
+
+        for filters in [&Filters::default(), &filtered] {
+            for depth_cap in [None, Some(0), Some(1)] {
+                let options = Options {
+                    depth_cap,
+                    ..Options::default()
+                };
+                let sequential = scan_with(root.path(), filters, options, false);
+                let progress = Progress::new(true);
+                let parallel = run(root.path(), filters, options, &progress, 4).unwrap();
+                assert_eq!(
+                    (
+                        parallel.size,
+                        parallel.usage,
+                        parallel.items,
+                        parallel.mtime,
+                        parallel.flag
+                    ),
+                    (
+                        sequential.size,
+                        sequential.usage,
+                        sequential.items,
+                        sequential.mtime,
+                        sequential.flag
+                    )
+                );
+                assert_eq!(parallel.entries().count(), sequential.entries().count());
+                assert_eq!(progress.items(), STAT_CHUNK as i64 * 2 + 4);
+                assert_eq!(progress.usage(), parallel.usage);
+            }
+        }
     }
 
     #[test]

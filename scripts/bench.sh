@@ -2,6 +2,10 @@
 # Benchmark rdu against other disk-usage tools.
 set -euo pipefail
 
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/common.sh
+source "$here/scripts/common.sh"
+
 usage() {
 	cat <<'EOF'
 Usage: scripts/bench.sh [OPTIONS] [PATH]
@@ -63,10 +67,7 @@ done
 target="${target:-$HOME}"
 [[ $cache_mode == warm || $cache_mode == cold ]] ||
 	{ echo "--cache must be warm or cold" >&2; exit 2; }
-[[ $runs =~ ^[1-9][0-9]*$ ]] ||
-	{ echo "--runs must be a positive integer" >&2; exit 2; }
-[[ $warmups =~ ^[0-9]+$ ]] ||
-	{ echo "--warmups must be a non-negative integer" >&2; exit 2; }
+validate_samples "$runs" "$warmups"
 
 target="$(realpath -e -- "$target")"
 case "$target" in
@@ -75,7 +76,6 @@ case "$target" in
 		exit 2
 		;;
 esac
-here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 rdu="$here/target/release/rdu"
 
 shell_quote() {
@@ -88,15 +88,12 @@ if [[ "$target" == "/" ]]; then
 	rdu_command+=" --ignore-dirs /mnt"
 fi
 
-if [[ ! -x $rdu ]]; then
-	echo "building the release binary first..." >&2
-	cargo build --release --manifest-path "$here/Cargo.toml"
-fi
-
 if ! command -v hyperfine >/dev/null 2>&1; then
 	echo "hyperfine is required: mise install cargo:hyperfine" >&2
 	exit 1
 fi
+
+build_release "$here"
 
 # Skip competitors that are not installed.
 commands=(-n "rdu" "$rdu_command $target_arg >/dev/null")

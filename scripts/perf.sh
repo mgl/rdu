@@ -2,6 +2,10 @@
 # Measure rdu on a real directory.
 set -euo pipefail
 
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/common.sh
+source "$here/scripts/common.sh"
+
 usage() {
 	cat <<'EOF'
 Usage: scripts/perf.sh [OPTIONS] [PATH]
@@ -85,10 +89,7 @@ while (($#)); do
 	esac
 done
 
-[[ $runs =~ ^[1-9][0-9]*$ ]] ||
-	{ echo "--runs must be a positive integer" >&2; exit 2; }
-[[ $warmups =~ ^[0-9]+$ ]] ||
-	{ echo "--warmups must be a non-negative integer" >&2; exit 2; }
+validate_samples "$runs" "$warmups"
 
 IFS=',' read -r -a core_list <<< "$cores"
 for core in "${core_list[@]}"; do
@@ -124,16 +125,12 @@ if [[ "$target" == "/" ]]; then
 	find_args+=(-path /mnt -prune -o)
 fi
 
-here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [[ -n $binary ]]; then
 	rdu="$(realpath -e -- "$binary")" ||
 		{ echo "rdu perf: cannot resolve binary: $binary" >&2; exit 1; }
 else
 	rdu="$here/target/release/rdu"
-	if [[ ! -x $rdu ]]; then
-		echo "building the release binary first..." >&2
-		cargo build --release --manifest-path "$here/Cargo.toml"
-	fi
+	build_release "$here"
 fi
 [[ -x $rdu ]] || { echo "rdu perf: binary is not executable: $rdu" >&2; exit 1; }
 
@@ -283,6 +280,8 @@ cat <<EOF
 EOF
 
 while IFS=$'\t' read -r label median mean min max user system cpu rss files_per_second dirs_per_second entries_per_second syscalls; do
+	# Markdown backticks are literal, not command substitutions.
+	# shellcheck disable=SC2016
 	printf '| `%s` | %.3f | %.3f | %.3f | %.3f | %.3f | %.3f | %.1f%% | %.1f | %.0f | %.0f | %.0f | %s |\n' \
 		"$label" "$median" "$mean" "$min" "$max" "$user" "$system" "$cpu" "$rss" \
 		"$files_per_second" "$dirs_per_second" "$entries_per_second" "$syscalls"

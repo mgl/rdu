@@ -10,7 +10,7 @@ with [gdu](https://github.com/dundee/gdu).
 
 ## Installation
 
-Requires Rust 1.98 or later.
+Requires Rust 1.99 or later.
 
 ```sh
 cargo install --git https://github.com/mgl/rdu.git
@@ -227,12 +227,27 @@ mise exec -- ./scripts/bench-suite.sh --cache both
 
 ## Development
 
+The checked-in `rust-toolchain.toml` selects Rust and its formatting/linting
+components for local builds and CI.
+
 ```sh
 cargo fmt --all -- --check
 cargo clippy --all-targets --locked -- -D warnings
 cargo test --locked
 cargo build --release --locked
+shellcheck scripts/*.sh
+bash scripts/test.sh
 ```
+
+The same checks are available as `mise run fmt-check`, `mise run lint`,
+`mise run test`, and `mise run scripts-check`. CI runs these checks separately
+from the release-build benchmark.
+
+Benchmark and performance scripts refresh the release build before measuring it.
+Use `scripts/perf.sh --binary FILE` to measure a specific existing binary instead.
+`mise.toml` pins optional benchmark tools; install only the tools you need, for
+example `mise install cargo:hyperfine`. Cold-cache benchmarks drop the host page
+cache and require passwordless sudo or `RDU_DROP_CACHES_CMD`.
 
 ## License
 
