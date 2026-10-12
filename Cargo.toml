@@ -2,7 +2,7 @@
 name = "rdu"
 version = "0.1.1"
 edition = "2024"
-rust-version = "1.98.0"
+rust-version = "1.99.0"
 description = "Very fast disk usage analyzer"
 license = "MIT"
 repository = "https://github.com/mgl/rdu"

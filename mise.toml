@@ -1,15 +1,13 @@
 # Rust tooling and benchmark dependencies.
 
 [tools]
-rust = { version = "1.98.0", components = "rustfmt,clippy" }
-
 # Benchmark dependencies are installed on demand.
-"cargo:hyperfine" = "1.20.0"
+"cargo:hyperfine" = "2.0.0"
 "cargo:diskus" = "0.9.0"
-"cargo:du-dust" = "1.2.5"
+"cargo:du-dust" = "1.2.6"
 "cargo:parallel-disk-usage" = "0.24.0"
-gdu = "5.37.0"
-dua = "2.43.0"
+gdu = "5.38.0"
+dua = "2.45.1"
 
 [tasks.build]
 description = "Build the Rust rdu binary"
@@ -38,3 +36,6 @@ run = "./scripts/bench-suite.sh"
 [tasks.perf]
 description = "Measure rdu CPU, memory and speed on real files"
 run = "./scripts/perf.sh"
+
+[settings]
+idiomatic_version_file_enable_tools = ["rust"]
