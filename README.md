@@ -193,8 +193,38 @@ options still apply to the loaded tree.
 | Repeat a sort key | Reverse that sort order |
 | `a` | Toggle apparent size and disk usage |
 | `/` | Filter names; `Enter` keeps the filter and `Esc` clears it |
+| `d` / `Delete` | Mark or unmark the selected file/folder for permanent deletion |
+| `x` | Review and apply marked deletions |
+| `u` | Clear all deletion marks |
 | `?` | Show help |
-| `q`, `Ctrl-C` | Quit |
+| `q`, `Ctrl-C` | Quit; review pending deletions first if any are marked |
+
+Marked entries show a red `D`, including children inside a marked folder.
+Marking does not modify the filesystem or rescan it. The footer shows the
+number of marked entries and their estimated potential space release without
+double-counting marked descendants.
+
+Press `x`, or quit with pending marks, to review the full paths. Type the exact
+word `DELETE` and press `Enter` to permanently delete the batch. **There is no
+Trash or undo. A marked folder is deleted with all its contents, including
+entries hidden by scan filters or unreadable during scanning.** `Esc` cancels
+the confirmation and keeps the marks; use `u` then `q` to quit without deleting.
+Use `Page Up` / `Page Down` to scroll the review.
+
+The space estimate uses scanned allocated sizes, regardless of apparent-size
+display mode. It is not guaranteed free space: hard links, snapshots, shared
+blocks, filters, and filesystem changes can affect the result. Deletion and the
+subsequent rescan run in a background worker; the browser shows a working dialog
+and prevents further changes until they finish. Failures are displayed explicitly;
+partially deleted folders are not rolled back. Successful deletions are removed
+from the batch, while failed and unattempted entries remain marked.
+
+Deletion never follows symlinks, refuses traversal through symlinked parent
+directories or onto other filesystems, and rejects marked entries whose identity
+has changed. The scan root itself cannot be marked. Browsing a saved report
+with `-f` is read-only and cannot delete filesystem entries.
+Deletion requires Linux `openat2` support (kernel 5.6 or newer, permitted by
+the process sandbox); if unavailable, marking fails with an explicit error.
 
 Use `rdu --help` for the complete option reference.
 

@@ -1,5 +1,6 @@
 //! rdu — a very fast disk usage analyzer.
 
+mod delete;
 mod filter;
 mod format;
 mod output;
@@ -195,8 +196,24 @@ fn run(cli: &Cli) -> Fallible {
 
     if cli.interactive() {
         let flag = tree.flag;
-        tui::run(tree, cli.show_apparent_size, size_format)?;
-        return ensure_complete(flag);
+        let refresh: Option<tui::Refresh> = if cli.input_file.is_none() {
+            let root = tree.fs_name().to_owned();
+            let root = PathBuf::from(root);
+            let filters = build_filters(cli, &root)?;
+            let options = scan_options(cli);
+            let workers = worker_count(cli);
+            Some(Box::new(move || {
+                scan::run(&root, &filters, options, &Progress::default(), workers)
+            }))
+        } else {
+            None
+        };
+        let final_flag = tui::run(tree, cli.show_apparent_size, size_format, refresh)?;
+        return ensure_complete(if flag.is_incomplete() {
+            flag
+        } else {
+            final_flag
+        });
     }
 
     let stdout = io::stdout();
@@ -264,11 +281,7 @@ fn ensure_complete(flag: tree::Flag) -> Fallible {
 fn analyze(cli: &Cli) -> Result<tree::Dir, Box<dyn Error>> {
     let root = std::path::absolute(&cli.path)?;
     let filters = build_filters(cli, &root)?;
-    let options = Options {
-        depth_cap: depth_cap(cli),
-        follow_symlinks: cli.follow_symlinks,
-        one_filesystem: cli.no_cross,
-    };
+    let options = scan_options(cli);
 
     let threads = worker_count(cli);
     let show_progress = !cli.no_progress && io::stderr().is_terminal();
@@ -295,6 +308,14 @@ fn worker_count(cli: &Cli) -> usize {
         // Metadata walks benefit from several lookups in flight per core.
         _ => std::thread::available_parallelism()
             .map_or(1, |cores| cores.get().saturating_mul(4).min(64)),
+    }
+}
+
+fn scan_options(cli: &Cli) -> Options {
+    Options {
+        depth_cap: depth_cap(cli),
+        follow_symlinks: cli.follow_symlinks,
+        one_filesystem: cli.no_cross,
     }
 }
 
