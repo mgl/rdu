@@ -7,7 +7,7 @@
 "cargo:du-dust" = "1.2.6"
 "cargo:parallel-disk-usage" = "0.24.0"
 gdu = "5.38.0"
-dua = "2.45.1"
+dua = "2.46.0"
 
 [tasks.build]
 description = "Build the Rust rdu binary"
