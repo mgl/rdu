@@ -323,15 +323,26 @@ Scanner-only wall-clock times on 8-core WSL2, with output discarded.
 Percentages are relative to `rdu`; results depend on hardware, filesystem,
 directory layout, and cache state.
 
-Warm cache: 10 measured runs after 3 warmups.
+Warm cache (`rdu` v0.1.4): mean of 10 measured runs after 3 warmups.
+Linux 7.2.2 has 100,960 entries, `flat-1m` has 1,000,001, and `wide-400k`
+has 500,001.
 
-| Fixture | Entries | `rdu` | `pdu` | `diskus` | `dust` |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| Linux 7.2.2 | 100,960 | 53.0 ms | 53.0 ms (+0%) | 66.2 ms (+25%) | 92.7 ms (+75%) |
-| `flat-1m` | 1,000,001 | 576.2 ms | 920.5 ms (+60%) | 846.1 ms (+47%) | 1.788 s (+210%) |
-| `wide-400k` | 500,001 | 230.0 ms | 356.9 ms (+55%) | 371.2 ms (+61%) | 540.8 ms (+135%) |
+| Tool | Linux 7.2.2 | `flat-1m` | `wide-400k` |
+| --- | ---: | ---: | ---: |
+| `rdu` | 73.0 ms | 673.7 ms | 397.8 ms |
+| `pdu` | 94.6 ms (+30%) | 964.2 ms (+43%) | 481.1 ms (+21%) |
+| `diskus` | 94.1 ms (+29%) | 998.7 ms (+48%) | 705.0 ms (+77%) |
+| `dust` | 113.5 ms (+55%) | 2.010 s (+198%) | 673.2 ms (+69%) |
+| `dua` | 868.7 ms (+1090%) | 12.687 s (+1783%) | 6.732 s (+1592%) |
+| `du` | 572.7 ms (+684%) | 3.168 s (+370%) | 5.493 s (+1281%) |
+| `ncdu` | 308.4 ms (+322%) | 2.303 s (+242%) | 2.196 s (+452%) |
+| `gdu` | 189.7 ms (+160%) | 6.349 s (+843%) | 916.9 ms (+131%) |
 
-Cold cache: 3 measured runs with the page cache dropped before each run.
+Hyperfine flagged a slow first measured run for `dua` on `flat-1m`; it remains
+included in the mean.
+
+Historical cold-cache results (not rerun for `rdu` v0.1.4): 3 measured runs with
+the page cache dropped before each run.
 
 | Fixture | `rdu` | `pdu` | `diskus` | `dust` |
 | --- | ---: | ---: | ---: | ---: |
@@ -339,12 +350,21 @@ Cold cache: 3 measured runs with the page cache dropped before each run.
 | `flat-1m` | 3.261 s | 3.580 s (+10%) | 3.748 s (+15%) | 4.711 s (+44%) |
 | `wide-400k` | 1.724 s | 4.088 s (+137%) | 2.596 s (+51%) | 4.329 s (+151%) |
 
-Reproduce the benchmark suite:
+Reproduce the warm-cache benchmark suite (skip fixture creation if they already
+exist). Hyperfine 2.0 requires an explicit shell for the scripts' redirections:
 
 ```sh
 ./scripts/make-fixtures.sh
-mise exec -- ./scripts/bench-suite.sh --cache both
+mise exec -- bash -c '
+  hyperfine() { command hyperfine --shell=sh "$@"; }
+  export -f hyperfine
+  ./scripts/bench-suite.sh --cache warm
+'
 ```
+
+Cold-cache testing was skipped to avoid clearing the host-wide page cache.
+Use `--cache both` instead of `--cache warm` only when that disruption is
+acceptable and cache-dropping permissions are available.
 
 ## Development
 
