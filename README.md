@@ -2,24 +2,51 @@
 
 [![CI](https://github.com/mgl/rdu/actions/workflows/ci.yml/badge.svg)](https://github.com/mgl/rdu/actions/workflows/ci.yml)
 
-Fast disk usage analyzer for Linux.
+Parallel disk usage analysis for Linux, written in Rust.
 
-`rdu` scans directory trees in parallel and displays the results in an
-interactive terminal browser or as text and JSON. JSON reports are compatible
-with [gdu](https://github.com/dundee/gdu).
+`rdu` combines a metadata-oriented scanner with an interactive terminal browser,
+scriptable text output, and [gdu-compatible](https://github.com/dundee/gdu) JSON
+reports.
+
+- Parallel traversal with configurable worker limits.
+- Allocated and apparent sizes, hard-link deduplication, and filesystem boundaries.
+- Path, extension, and modification-time filters.
+- Interactive sorting, navigation, and explicitly confirmed batch deletion.
+- Static x86-64 and ARM64 binaries; signed APT/RPM repositories; minimal containers.
+
+[Usage](#usage) · [Installation](#installation) · [Scanning](#scanning) ·
+[Terminal interface](#terminal-interface) · [Benchmarks](#benchmarks)
+
+## Usage
+
+```sh
+rdu "$HOME"               # interactive browser
+rdu -n --depth 2 /var     # directory totals, two levels deep
+rdu -n --top 20 "$HOME"   # largest files across the tree
+rdu -n -s .              # one total
+rdu -o report.json .     # export a scan
+rdu -f report.json       # browse a saved report
+```
+
+The default path is `.`. A terminal on stdout selects the interactive browser;
+redirected or piped output selects text. Use `-n` to force text output.
+
+Entries are sorted largest-first; `--reverse-sort` reverses the order.
+`--summarize`, `--depth`, and `--top` are mutually exclusive layouts.
+Run `rdu --help` for the complete option reference.
 
 ## Installation
 
+Linux x86-64 and ARM64 are supported. Static binaries run on both glibc- and
+musl-based distributions without a Rust toolchain.
+
 ### Repository signing key
 
-The APT and RPM repositories use this public signing-key fingerprint:
+Verify the APT/RPM signing key before adding either repository:
 
 ```text
 6EA8 839A 32AB 3FD2 14A1 503E 5499 C701 15C9 2C2E
 ```
-
-Before adding either repository, display the downloaded key's fingerprint and
-check that it matches:
 
 ```sh
 curl -fsSL https://mgl.github.io/rdu/rdu.asc |
@@ -58,16 +85,13 @@ EOF
 sudo dnf install rdu
 ```
 
-Both repositories support x86-64 and ARM64. Later releases arrive through normal
-system updates. APT verifies signed repository metadata; DNF verifies both
-metadata and package signatures. Verify the key's fingerprint against the
-fingerprint above before trusting it.
+Both repositories integrate with system updates. APT verifies signed repository
+metadata; DNF verifies metadata and package signatures.
 
-### Prebuilt Linux binaries
+### Static binaries
 
-Download a static binary from the
-[latest release](https://github.com/mgl/rdu/releases/latest). No Rust installation
-is needed. Choose `x86_64` for most Intel/AMD machines or `aarch64` for ARM64.
+Download and verify an archive from the
+[latest release](https://github.com/mgl/rdu/releases/latest):
 
 ```sh
 # Use aarch64-unknown-linux-musl instead on ARM64.
@@ -80,17 +104,14 @@ tar -xzf "rdu-$target.tar.gz" rdu
 install -Dm755 rdu "$HOME/.local/bin/rdu"
 ```
 
-Ensure `$HOME/.local/bin` is on your `PATH`, or run
-`"$HOME/.local/bin/rdu"` directly. These binaries support both glibc- and
-musl-based Linux distributions.
+Add `$HOME/.local/bin` to `PATH` if needed.
 
-### Docker / Podman
+### Containers
 
-Container images are published to GitHub Container Registry for x86-64 and ARM64.
-Use `latest` for the newest stable release, or a version tag such as `0.1.4`.
+`ghcr.io/mgl/rdu` provides x86-64 and ARM64 images built from `scratch`.
+Use `latest` for the current stable release or a version tag such as `0.1.4`.
 
-Mount the directory to scan at `/data`. A read-only mount allows scanning while
-preventing accidental deletion of host files:
+Mount the scan root at `/data`. A read-only mount prevents host-file deletion:
 
 ```sh
 docker run --rm -it --read-only --network none --cap-drop ALL \
@@ -98,7 +119,7 @@ docker run --rm -it --read-only --network none --cap-drop ALL \
   -v "$PWD:/data:ro" ghcr.io/mgl/rdu:latest
 ```
 
-For non-interactive output, omit `-it` and pass the usual CLI options:
+For text output, omit `-it` and pass CLI options after the image:
 
 ```sh
 docker run --rm --read-only --network none --cap-drop ALL \
@@ -106,54 +127,24 @@ docker run --rm --read-only --network none --cap-drop ALL \
   -v "$PWD:/data:ro" ghcr.io/mgl/rdu:latest -n -s /data
 ```
 
-Replace `docker` with `podman` to use Podman. On SELinux systems, mount a suitable
-directory with `:ro,Z` to give the container access; this relabels that directory,
-so avoid using it on system directories. Report paths refer to the container
-filesystem; mount an additional writable directory to save JSON reports.
+Podman is also supported. On SELinux systems, `:ro,Z` grants access by relabeling
+the mounted directory; do not apply it to system directories. Report paths are
+container-local; saving JSON reports requires a writable output mount.
 
-### Build from source
+### Source
 
-Requires Rust 1.99.1 or later.
+Requires Rust **1.99.1** or newer.
 
 ```sh
 cargo install --git https://github.com/mgl/rdu.git
 ```
 
-## Quick start
+## Scanning
 
-Scan the current directory:
+### Size accounting
 
-```sh
-rdu
-```
-
-Pass a path to scan somewhere else:
-
-```sh
-rdu "$HOME"
-```
-
-When standard output is a terminal, `rdu` opens the interactive browser. It
-prints text instead when output is redirected or piped. Use `-n` to force text
-output in a terminal.
-
-```sh
-rdu -n "$HOME"             # list the path's direct children
-rdu -n -s "$HOME"          # print one total
-rdu -n --depth 2 /var      # show two directory levels
-rdu -n --top 20 "$HOME"    # show the 20 largest files anywhere below the path
-rdu -n "$HOME" | head     # piping also selects text output
-```
-
-`--summarize`, `--depth`, and `--top` select different output layouts and
-cannot be combined. Entries are largest-first by default; `--reverse-sort`
-lists them smallest-first.
-
-## Sizes and display
-
-By default, `rdu` reports disk usage: the storage blocks allocated by the
-filesystem. Use `-a` to report apparent size (the file length) instead. Sparse
-files can have a much larger apparent size than disk usage.
+By default, sizes reflect allocated filesystem blocks. `-a` selects apparent
+size (file length), which can be substantially larger for sparse files.
 
 ```sh
 rdu -n -a "$HOME"
@@ -164,16 +155,14 @@ rdu -n --no-prefix "$HOME" # report raw bytes
 rdu -n -c "$HOME"          # disable color
 ```
 
-`--no-prefix` cannot be combined with `--si` or `--show-in-kib`. Color and scan
-progress are enabled only when their respective output streams are terminals;
-`--no-color` and `--no-progress` disable them explicitly.
+`--no-prefix` conflicts with `--si` and `--show-in-kib`. Color and progress are
+enabled only on their respective terminal streams; disable them explicitly with
+`--no-color` and `--no-progress`.
 
-## Filtering
+### Directory filters
 
-### Directories
-
-Skip exact directory paths with `-i`. Relative paths are resolved from the
-directory being scanned, not from the shell's current directory.
+`-i` excludes exact directory paths. Relative paths resolve against the scan
+root, not the shell's working directory.
 
 ```sh
 rdu -i target,node_modules .
@@ -181,17 +170,16 @@ rdu -i /var/cache /var
 rdu -H "$HOME"                         # skip directories beginning with a dot
 ```
 
-Use `-I` for regular expressions. A pattern is matched against the complete
-absolute directory path, so include `.*` when matching an arbitrary prefix or
-suffix.
+`-I` matches regular expressions against complete absolute directory paths.
+Use `.*` for an arbitrary prefix or suffix.
 
 ```sh
 rdu -I '.*/(target|node_modules)' .
 rdu -I '.*/cache(/.*)?' "$HOME"
 ```
 
-`-X FILE` reads one regular expression per non-empty line. Lines are trimmed;
-there is no special comment syntax.
+`-X FILE` loads one regular expression per non-empty line. Whitespace is trimmed;
+comments have no special syntax.
 
 ```text
 .*/target
@@ -202,7 +190,7 @@ there is no special comment syntax.
 rdu -X .rdu-ignore .
 ```
 
-### File types and modification time
+### Extension and time filters
 
 `-T` counts only the listed filename extensions, while `-E` excludes them.
 Extensions are matched case-insensitively and should be written without a
@@ -213,10 +201,10 @@ rdu -T rs,toml .             # only .rs and .toml files
 rdu -E jpg,jpeg,png "$HOME"  # everything except these extensions
 ```
 
-Time filters apply to file modification times. `--since` and `--until` accept
-an RFC 3339 timestamp or a local `YYYY-MM-DD` date; date bounds include the
-whole named day. Relative age filters accept compound durations using `y`,
-`mo`, `w`, `d`, `h`, `m`, and `s`. A year is 365 days and a month is 30 days.
+Time filters use file modification times. `--since` and `--until` accept RFC 3339
+timestamps or local `YYYY-MM-DD` dates, inclusive of the entire named day.
+Relative ages accept compound durations in `y`, `mo`, `w`, `d`, `h`, `m`, and `s`;
+a year is 365 days and a month is 30 days.
 
 ```sh
 rdu --since 2026-01-01 .
@@ -226,19 +214,18 @@ rdu --min-age 1y2mo .        # files at least one year and two months old
 rdu --max-age 2h30m .
 ```
 
-Multiple time options form an intersection, allowing an absolute or relative
-range to be narrowed further.
+Multiple time filters are intersected.
 
-## Filesystems and parallelism
+### Filesystem semantics
 
-`rdu` counts each hard-linked inode once. Symlinks are measured as links by
-default. `-L` reports the target size of file symlinks, while directory
-symlinks are never followed. Use `-x` to stay on the filesystem where the scan
-started.
+- Each hard-linked inode is counted once.
+- Symlinks are measured as links by default. `-L` measures file-symlink targets;
+  directory symlinks are never followed.
+- `-x` restricts traversal to the scan root's filesystem.
 
-The scanner normally uses several workers per available core to keep metadata
-lookups in flight. Limit it with `-m N`, or use `--sequential` for rotating
-disks. These two options cannot be combined.
+The scanner uses several workers per available core to overlap metadata lookups.
+`-m N` caps workers; `--sequential` disables parallel traversal and can be useful
+on rotating disks. These options are mutually exclusive.
 
 ```sh
 rdu -x /
@@ -246,16 +233,13 @@ rdu -m 8 "$HOME"
 rdu --sequential /mnt/hdd
 ```
 
-Unreadable paths and files with invalid size metadata (such as allocated blocks
-exceeding filesystem capacity on some Windows mounts) are marked in the results
-and skipped. No apparent-size estimate is substituted for invalid disk usage.
-After producing the available output, `rdu` reports that the scan was incomplete
-and exits with a failure status.
+Unreadable paths and invalid size metadata are flagged and skipped. Allocated
+size is never replaced with an apparent-size estimate. An incomplete scan still
+produces the available results, then exits with a failure status.
 
-## Saved reports
+## JSON reports
 
-Write the complete scan as JSON with `-o`, then reopen it later in the browser
-or render it as text without rescanning.
+Export with `-o`; load with `-f` to browse or render without rescanning.
 
 ```sh
 rdu -o report.json "$HOME"
@@ -263,27 +247,26 @@ rdu -f report.json
 rdu -n --depth 2 -f report.json
 ```
 
-Use `-` to stream a report through standard output or standard input:
+`-` selects stdout or stdin:
 
 ```sh
 rdu -o - "$HOME" >report.json
 rdu -n -f - <report.json
 ```
 
-Reports use the same format as [gdu](https://github.com/dundee/gdu). With
-`--output-attrs`, an export can be limited to a comma-separated selection of
-`name`, `asize`, `dsize`, `items`, `mtime`, and `notreg`. `name` is always
-present; omitted numeric attributes are unavailable when the report is loaded
-again.
+The format is compatible with [gdu](https://github.com/dundee/gdu).
+`--output-attrs` selects a comma-separated subset of `name`, `asize`, `dsize`,
+`items`, `mtime`, and `notreg`. `name` is always included; omitted numeric
+attributes remain unavailable when loading the report.
 
 ```sh
 rdu -o sizes.json --output-attrs name,asize,dsize "$HOME"
 ```
 
-Scan filters and scanner options have no effect with `-f`; display and output
-options still apply to the loaded tree.
+With `-f`, scan filters and scanner options are ignored. Display and output
+options still apply. Saved reports are read-only.
 
-## Browser controls
+## Terminal interface
 
 | Key | Action |
 | --- | --- |
@@ -302,40 +285,39 @@ options still apply to the loaded tree.
 | `?` | Show help |
 | `q`, `Ctrl-C` | Quit; review pending deletions first if any are marked |
 
-Marked entries show a red `D`, including children inside a marked folder.
-Marking does not modify the filesystem or rescan it. The footer shows the
-number of marked entries and their estimated potential space release without
-double-counting marked descendants.
+### Deletion
 
-Press `x`, or quit with pending marks, to review the full paths. Type the exact
-word `DELETE` and press `Enter` to permanently delete the batch. **There is no
-Trash or undo. A marked folder is deleted with all its contents, including
-entries hidden by scan filters or unreadable during scanning.** `Esc` cancels
-the confirmation and keeps the marks; use `u` then `q` to quit without deleting.
-Use `Page Up` / `Page Down` to scroll the review.
+`d` marks entries without modifying the filesystem. Marks appear as a red `D`,
+including descendants of marked directories. The footer estimates allocated
+space without double-counting marked descendants.
 
-The space estimate uses scanned allocated sizes, regardless of apparent-size
-display mode. It is not guaranteed free space: hard links, snapshots, shared
-blocks, filters, and filesystem changes can affect the result. Deletion and the
-subsequent rescan run in a background worker; the browser shows a working dialog
-and prevents further changes until they finish. Failures are displayed explicitly;
-partially deleted folders are not rolled back. Successful deletions are removed
-from the batch, while failed and unattempted entries remain marked.
+Press `x`, or quit with pending marks, to review full paths. Type `DELETE` and
+press `Enter` to confirm. `Page Up` / `Page Down` scroll the review; `Esc` cancels
+confirmation but retains marks. Use `u`, then `q`, to exit without deleting.
 
-Deletion never follows symlinks, refuses traversal through symlinked parent
-directories or onto other filesystems, and rejects marked entries whose identity
-has changed. The scan root itself cannot be marked. Browsing a saved report
-with `-f` is read-only and cannot delete filesystem entries.
-Deletion requires Linux `openat2` support (kernel 5.6 or newer, permitted by
-the process sandbox); if unavailable, marking fails with an explicit error.
+**Deletion is permanent. There is no Trash or undo. Marked directories are
+removed recursively, including contents hidden by filters or unreadable during
+the scan.**
 
-Use `rdu --help` for the complete option reference.
+- Deletion never follows symlinks, crosses filesystems, traverses symlinked
+  parents, or accepts marked entries whose identity has changed.
+- The scan root cannot be marked. Saved reports cannot modify the filesystem.
+- Deletion requires Linux `openat2` (kernel 5.6+) and permission to use it in the
+  process sandbox. Unsupported environments fail explicitly when marking.
+- Deletion and rescan run in a background worker; further changes are blocked
+  until completion. Failures are displayed. Successful entries leave the batch;
+  failed and unattempted entries remain marked. Partial deletions are not rolled
+  back.
+
+Space estimates use scanned allocated sizes, even in apparent-size mode. They do
+not guarantee reclaimed space: hard links, snapshots, shared blocks, filters,
+and concurrent filesystem changes affect the result.
 
 ## Benchmarks
 
-`rdu` is optimized for metadata-heavy directory scans. The results below are
-scanner-only wall-clock times on 8-core WSL2 with output discarded. `rdu` is the
-baseline; percentages show how much slower each competitor was.
+Scanner-only wall-clock times on 8-core WSL2, with output discarded.
+Percentages are relative to `rdu`; results depend on hardware, filesystem,
+directory layout, and cache state.
 
 Warm cache: 10 measured runs after 3 warmups.
 
@@ -362,19 +344,8 @@ mise exec -- ./scripts/bench-suite.sh --cache both
 
 ## Development
 
-### Publishing a release
-
-Set the version in `Cargo.toml` and update `Cargo.lock`, then push a matching
-`v`-prefixed tag (for example, `v0.1.2`). The release workflow tests and builds
-static Linux x86-64 and ARM64 binaries on native runners, smoke-tests the
-packaged executables, and publishes both archives and `SHA256SUMS` to GitHub
-Releases. Pull requests changing the release workflow or build configuration
-also run the packaging jobs without publishing.
-
-### Local checks
-
-The checked-in `rust-toolchain.toml` selects Rust and its formatting/linting
-components for local builds and CI.
+[`rust-toolchain.toml`](rust-toolchain.toml) pins the toolchain and components
+used locally and in CI.
 
 ```sh
 cargo fmt --all -- --check
@@ -385,15 +356,14 @@ shellcheck scripts/*.sh
 bash scripts/test.sh
 ```
 
-The same checks are available as `mise run fmt-check`, `mise run lint`,
-`mise run test`, and `mise run scripts-check`. CI runs these checks separately
-from the release-build benchmark.
+Mise equivalents: `mise run fmt-check`, `mise run lint`, `mise run test`, and
+`mise run scripts-check`. CI runs checks separately from release-build benchmarks.
 
-Benchmark and performance scripts refresh the release build before measuring it.
-Use `scripts/perf.sh --binary FILE` to measure a specific existing binary instead.
-`mise.toml` pins optional benchmark tools; install only the tools you need, for
-example `mise install cargo:hyperfine`. Cold-cache benchmarks drop the host page
-cache and require passwordless sudo or `RDU_DROP_CACHES_CMD`.
+Benchmark scripts rebuild in release mode before measuring.
+`scripts/perf.sh --binary FILE` measures an existing binary instead.
+[`mise.toml`](mise.toml) pins optional tools, such as `cargo:hyperfine`.
+Cold-cache runs drop the host page cache and require passwordless sudo or
+`RDU_DROP_CACHES_CMD`.
 
 ## License
 
