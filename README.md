@@ -12,10 +12,14 @@ reports.
 - Allocated and apparent sizes, hard-link deduplication, and filesystem boundaries.
 - Path, extension, and modification-time filters.
 - Interactive sorting, navigation, and explicitly confirmed batch deletion.
-- Static x86-64 and ARM64 binaries; signed APT/RPM repositories; minimal containers.
+- Static x86-64 and ARM64 binaries..
 
 [Usage](#usage) · [Installation](#installation) · [Scanning](#scanning) ·
 [Terminal interface](#terminal-interface) · [Benchmarks](#benchmarks)
+
+![rdu terminal browser showing directory sizes, usage bars, item counts, and navigation controls](assets/screenshot.png)
+
+*Interactive view of a synthetic workspace, using apparent sizes and item counts.*
 
 ## Usage
 
