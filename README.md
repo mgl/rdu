@@ -84,6 +84,33 @@ Ensure `$HOME/.local/bin` is on your `PATH`, or run
 `"$HOME/.local/bin/rdu"` directly. These binaries support both glibc- and
 musl-based Linux distributions.
 
+### Docker / Podman
+
+Container images are published to GitHub Container Registry for x86-64 and ARM64.
+Use `latest` for the newest stable release, or a version tag such as `0.1.4`.
+
+Mount the directory to scan at `/data`. A read-only mount allows scanning while
+preventing accidental deletion of host files:
+
+```sh
+docker run --rm -it --read-only --network none --cap-drop ALL \
+  --user "$(id -u):$(id -g)" \
+  -v "$PWD:/data:ro" ghcr.io/mgl/rdu:latest
+```
+
+For non-interactive output, omit `-it` and pass the usual CLI options:
+
+```sh
+docker run --rm --read-only --network none --cap-drop ALL \
+  --user "$(id -u):$(id -g)" \
+  -v "$PWD:/data:ro" ghcr.io/mgl/rdu:latest -n -s /data
+```
+
+Replace `docker` with `podman` to use Podman. On SELinux systems, mount a suitable
+directory with `:ro,Z` to give the container access; this relabels that directory,
+so avoid using it on system directories. Report paths refer to the container
+filesystem; mount an additional writable directory to save JSON reports.
+
 ### Build from source
 
 Requires Rust 1.99.1 or later.

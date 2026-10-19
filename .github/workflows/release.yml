@@ -14,6 +14,7 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - "rust-toolchain.toml"
+      - "Containerfile"
 
 permissions:
   contents: read
@@ -85,11 +86,68 @@ jobs:
           fi
         env:
           TARGET: ${{ matrix.target }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: rdu-${{ matrix.target }}
           path: dist/*.tar.gz
           if-no-files-found: error
+
+  container:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: rdu-*
+          path: dist
+          merge-multiple: true
+      - name: Prepare container build context
+        run: |
+          context="$RUNNER_TEMP/container"
+          mkdir -p "$context/amd64" "$context/arm64"
+          tar -xzf dist/rdu-x86_64-unknown-linux-musl.tar.gz -C "$context/amd64" rdu
+          tar -xzf dist/rdu-aarch64-unknown-linux-musl.tar.gz -C "$context/arm64" rdu
+          cp LICENSE "$context/"
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+      - name: Smoke-test container images
+        run: |
+          for arch in amd64 arm64; do
+            docker buildx build --platform "linux/$arch" \
+              --file Containerfile --load --tag "rdu:test-$arch" "$RUNNER_TEMP/container"
+            docker run --rm --platform "linux/$arch" rdu:test-"$arch" --version
+            docker run --rm --platform "linux/$arch" rdu:test-"$arch" --help
+            docker run --rm --platform "linux/$arch" --read-only --network none \
+              --cap-drop ALL --user "$(id -u):$(id -g)" \
+              --volume "$GITHUB_WORKSPACE:/data:ro" rdu:test-"$arch" -n -s /data
+          done
+      - uses: docker/login-action@v4
+        if: github.ref_type == 'tag'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/metadata-action@v6
+        id: metadata
+        with:
+          images: ghcr.io/${{ github.repository }}
+          flavor: latest=false
+          tags: |
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable=${{ github.ref_type == 'tag' && !contains(github.ref_name, '-') }}
+            type=ref,event=pr
+      - uses: docker/build-push-action@v7
+        with:
+          context: ${{ runner.temp }}/container
+          file: Containerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.ref_type == 'tag' }}
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
 
   packages:
     needs: build
@@ -98,12 +156,12 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: rdu-*
           path: dist
           merge-multiple: true
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version: stable
           cache: false
@@ -157,7 +215,7 @@ jobs:
           bash scripts/package.sh "$version" dist
           bash scripts/repository.sh dist "$RUNNER_TEMP/package-repository" "$fingerprint"
           bash scripts/test-repository.sh dist "$RUNNER_TEMP/package-repository"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: native-packages
           path: |
@@ -188,7 +246,7 @@ jobs:
           git push origin HEAD:refs/heads/gh-pages
         env:
           RELEASE_TAG: ${{ github.ref_name }}
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         if: github.ref_type == 'tag'
         with:
           path: ${{ runner.temp }}/package-repository
@@ -204,6 +262,6 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - uses: actions/configure-pages@v5
-      - uses: actions/deploy-pages@v4
+      - uses: actions/configure-pages@v6
+      - uses: actions/deploy-pages@v5
         id: deployment
