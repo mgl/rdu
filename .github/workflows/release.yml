@@ -1,0 +1,108 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]*"
+  pull_request:
+    paths:
+      - ".github/workflows/release.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - runner: ubuntu-26.04-arm
+            target: aarch64-unknown-linux-musl
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install the checked-in Rust toolchain
+        run: |
+          rustup show
+          rustup target add "$TARGET"
+          sudo apt-get update
+          sudo apt-get install --yes musl-tools
+        env:
+          TARGET: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+      - name: Check release version
+        if: github.ref_type == 'tag'
+        run: |
+          version="$(cargo metadata --no-deps --format-version 1 --locked |
+            python3 -c 'import json, sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "rdu"))')"
+          if [[ "$RELEASE_TAG" != "v$version" ]]; then
+            echo "::error::Tag $RELEASE_TAG does not match Cargo.toml version v$version"
+            exit 1
+          fi
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+      - name: Test and build static binary
+        run: |
+          cargo test --locked --target "$TARGET"
+          cargo build --release --locked --target "$TARGET"
+        env:
+          TARGET: ${{ matrix.target }}
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+      - name: Package and smoke-test binary
+        run: |
+          mkdir -p dist smoke
+          tar -czf "dist/rdu-$TARGET.tar.gz" \
+            -C "target/$TARGET/release" rdu \
+            -C "$GITHUB_WORKSPACE" LICENSE README.md
+          tar -xzf "dist/rdu-$TARGET.tar.gz" -C smoke
+          smoke/rdu --version
+          smoke/rdu --help
+          smoke/rdu -n -s smoke
+          if readelf -l smoke/rdu | grep -q INTERP; then
+            echo "::error::Release binary requires a dynamic loader"
+            exit 1
+          fi
+        env:
+          TARGET: ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rdu-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: rdu-*
+          path: dist
+          merge-multiple: true
+      - name: Generate checksums
+        working-directory: dist
+        run: sha256sum rdu-*.tar.gz > SHA256SUMS
+      - name: Publish GitHub release
+        run: |
+          gh release create "$RELEASE_TAG" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag --generate-notes --title "$RELEASE_TAG"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}

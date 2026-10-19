@@ -10,7 +10,30 @@ with [gdu](https://github.com/dundee/gdu).
 
 ## Installation
 
-Requires Rust 1.99 or later.
+### Prebuilt Linux binaries
+
+Download a static binary from the
+[latest release](https://github.com/mgl/rdu/releases/latest). No Rust installation
+is needed. Choose `x86_64` for most Intel/AMD machines or `aarch64` for ARM64.
+
+```sh
+# Use aarch64-unknown-linux-musl instead on ARM64.
+target=x86_64-unknown-linux-musl
+base=https://github.com/mgl/rdu/releases/latest/download
+curl -fLO "$base/rdu-$target.tar.gz"
+curl -fLO "$base/SHA256SUMS"
+grep "  rdu-$target.tar.gz$" SHA256SUMS | sha256sum --check --strict -
+tar -xzf "rdu-$target.tar.gz" rdu
+install -Dm755 rdu "$HOME/.local/bin/rdu"
+```
+
+Ensure `$HOME/.local/bin` is on your `PATH`, or run
+`"$HOME/.local/bin/rdu"` directly. These binaries support both glibc- and
+musl-based Linux distributions.
+
+### Build from source
+
+Requires Rust 1.99.1 or later.
 
 ```sh
 cargo install --git https://github.com/mgl/rdu.git
@@ -258,6 +281,17 @@ mise exec -- ./scripts/bench-suite.sh --cache both
 ```
 
 ## Development
+
+### Publishing a release
+
+Set the version in `Cargo.toml` and update `Cargo.lock`, then push a matching
+`v`-prefixed tag (for example, `v0.1.2`). The release workflow tests and builds
+static Linux x86-64 and ARM64 binaries on native runners, smoke-tests the
+packaged executables, and publishes both archives and `SHA256SUMS` to GitHub
+Releases. Pull requests changing the release workflow or build configuration
+also run the packaging jobs without publishing.
+
+### Local checks
 
 The checked-in `rust-toolchain.toml` selects Rust and its formatting/linting
 components for local builds and CI.
