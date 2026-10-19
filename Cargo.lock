@@ -800,7 +800,7 @@ dependencies = [
 
 [[package]]
 name = "rdu"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "clap",
  "crossbeam-deque",
