@@ -143,9 +143,11 @@ rdu -m 8 "$HOME"
 rdu --sequential /mnt/hdd
 ```
 
-Unreadable paths are marked in the results and skipped. After producing the
-available output, `rdu` reports that the scan was incomplete and exits with a
-failure status.
+Unreadable paths and files with invalid size metadata (such as allocated blocks
+exceeding filesystem capacity on some Windows mounts) are marked in the results
+and skipped. No apparent-size estimate is substituted for invalid disk usage.
+After producing the available output, `rdu` reports that the scan was incomplete
+and exits with a failure status.
 
 ## Saved reports
 

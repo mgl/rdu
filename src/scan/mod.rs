@@ -863,32 +863,27 @@ impl Walk<'_> {
         if self.options.one_filesystem && device_of(&stat) != self.root_device {
             return ResolvedEntry::Skip;
         }
-        self.resolve_meta(&stat)
-            .map_or(ResolvedEntry::Skip, ResolvedEntry::File)
-    }
-
-    /// Resolves metadata shared by all stat paths.
-    fn resolve_meta(&self, stat: &Statx) -> Option<FileMeta> {
         if !self
             .filters
             .accepts_mtime(stat.stx_mtime.tv_sec, i64::from(stat.stx_mtime.tv_nsec))
         {
-            return None;
+            return ResolvedEntry::Skip;
         }
 
-        let mut stats = FileStats::plain(
-            stat.stx_size as i64,
-            stat.stx_blocks as i64 * BLOCK_SIZE,
-            stat.stx_mtime.tv_sec,
-        );
-        if file_type(stat) != FileType::RegularFile {
+        let (size, usage) = match file_sizes(dirfd, listing.c_name(entry), &stat) {
+            Ok(sizes) => sizes,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return ResolvedEntry::Skip,
+            Err(_) => return ResolvedEntry::ChildUnreadable,
+        };
+        let mut stats = FileStats::plain(size, usage, stat.stx_mtime.tv_sec);
+        if file_type(&stat) != FileType::RegularFile {
             stats = stats.with_flag(Flag::NotRegular);
         }
 
         let deduplicate = self.options.follow_symlinks || stat.stx_nlink > 1;
-        Some(FileMeta {
+        ResolvedEntry::File(FileMeta {
             stats,
-            device: if deduplicate { device_of(stat) } else { 0 },
+            device: if deduplicate { device_of(&stat) } else { 0 },
             inode: if deduplicate { stat.stx_ino } else { 0 },
             deduplicate,
         })
@@ -973,6 +968,36 @@ fn file_type(stat: &Statx) -> FileType {
     FileType::from_raw_mode(stat.stx_mode.into())
 }
 
+fn file_sizes(dirfd: &OwnedFd, name: &CStr, stat: &Statx) -> io::Result<(i64, i64)> {
+    let invalid = || {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid file size or block count",
+        )
+    };
+    let size = i64::try_from(stat.stx_size).map_err(|_| invalid())?;
+    let usage = i64::try_from(stat.stx_blocks)
+        .ok()
+        .and_then(|blocks| blocks.checked_mul(BLOCK_SIZE))
+        .ok_or_else(invalid)?;
+
+    // Allocation can exceed length (preallocation), but not filesystem capacity.
+    // Avoid extra syscalls for ordinary files, including allocation rounding.
+    if usage > size.saturating_add(i64::from(stat.stx_blksize)) {
+        let mut flags = OFlags::PATH | OFlags::CLOEXEC;
+        if file_type(stat) == FileType::Symlink {
+            flags |= OFlags::NOFOLLOW;
+        }
+        let fd = rustix::fs::openat(dirfd, name, flags, Mode::empty())?;
+        let fs = rustix::fs::fstatvfs(&fd)?;
+        let capacity = u128::from(fs.f_blocks) * u128::from(fs.f_frsize);
+        if u128::from(stat.stx_blocks) * BLOCK_SIZE as u128 > capacity {
+            return Err(invalid());
+        }
+    }
+    Ok((size, usage))
+}
+
 fn open_dir(
     at: BorrowedFd<'_>,
     path: impl rustix::path::Arg,
@@ -1016,6 +1041,50 @@ mod tests {
     use std::os::unix::fs as unix_fs;
 
     use tempfile::TempDir;
+
+    #[test]
+    fn invalid_file_sizes_are_rejected_before_accounting() {
+        let root = TempDir::new().unwrap();
+        fs::write(root.path().join("file"), []).unwrap();
+        let dirfd = open_dir(rustix::fs::CWD, root.path(), false).unwrap();
+        let mut stat =
+            rustix::fs::statx(&dirfd, c"file", AtFlags::SYMLINK_NOFOLLOW, STATX_MASK).unwrap();
+
+        for (size, blocks) in [
+            (206, 11_604_454_968_571_810),
+            (288, 11_604_454_968_571_810),
+            (0, i64::MAX as u64 / BLOCK_SIZE as u64 + 1),
+            (0, u64::MAX),
+            (u64::MAX, 0),
+        ] {
+            stat.stx_size = size;
+            stat.stx_blocks = blocks;
+            assert_eq!(
+                file_sizes(&dirfd, c"file", &stat).unwrap_err().kind(),
+                io::ErrorKind::InvalidData,
+                "size={size}, blocks={blocks}"
+            );
+        }
+    }
+
+    #[test]
+    fn file_sizes_preserve_sparse_rounded_and_preallocated_usage() {
+        let root = TempDir::new().unwrap();
+        fs::write(root.path().join("file"), []).unwrap();
+        let dirfd = open_dir(rustix::fs::CWD, root.path(), false).unwrap();
+        let mut stat =
+            rustix::fs::statx(&dirfd, c"file", AtFlags::SYMLINK_NOFOLLOW, STATX_MASK).unwrap();
+        stat.stx_blksize = 4096;
+
+        for (size, blocks) in [(1 << 40, 0), (1, 8), (0, 128)] {
+            stat.stx_size = size;
+            stat.stx_blocks = blocks;
+            assert_eq!(
+                file_sizes(&dirfd, c"file", &stat).unwrap(),
+                (size as i64, blocks as i64 * BLOCK_SIZE)
+            );
+        }
+    }
 
     #[test]
     fn inline_ranges_preserve_indices_and_skip_separate_tasks() {
