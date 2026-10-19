@@ -10,6 +10,59 @@ with [gdu](https://github.com/dundee/gdu).
 
 ## Installation
 
+### Repository signing key
+
+The APT and RPM repositories use this public signing-key fingerprint:
+
+```text
+6EA8 839A 32AB 3FD2 14A1 503E 5499 C701 15C9 2C2E
+```
+
+Before adding either repository, display the downloaded key's fingerprint and
+check that it matches:
+
+```sh
+curl -fsSL https://mgl.github.io/rdu/rdu.asc |
+  gpg --show-keys --with-fingerprint
+```
+
+### APT (Debian, Ubuntu, Mint)
+
+Add the repository signing key and source once:
+
+```sh
+sudo install -d -m 755 /etc/apt/keyrings
+curl -fsSL https://mgl.github.io/rdu/rdu.asc |
+  sudo tee /etc/apt/keyrings/rdu.asc >/dev/null
+sudo chmod 644 /etc/apt/keyrings/rdu.asc
+echo "deb [signed-by=/etc/apt/keyrings/rdu.asc] https://mgl.github.io/rdu/apt stable main" |
+  sudo tee /etc/apt/sources.list.d/rdu.list >/dev/null
+sudo apt update
+sudo apt install rdu
+```
+
+### DNF (Fedora, Rocky Linux, AlmaLinux)
+
+Add the repository source once:
+
+```sh
+sudo tee /etc/yum.repos.d/rdu.repo >/dev/null <<'EOF'
+[rdu]
+name=rdu
+baseurl=https://mgl.github.io/rdu/rpm
+enabled=1
+gpgcheck=1
+repo_gpgcheck=1
+gpgkey=https://mgl.github.io/rdu/rdu.asc
+EOF
+sudo dnf install rdu
+```
+
+Both repositories support x86-64 and ARM64. Later releases arrive through normal
+system updates. APT verifies signed repository metadata; DNF verifies both
+metadata and package signatures. Verify the key's fingerprint against the
+fingerprint above before trusting it.
+
 ### Prebuilt Linux binaries
 
 Download a static binary from the

@@ -7,12 +7,20 @@ on:
   pull_request:
     paths:
       - ".github/workflows/release.yml"
+      - ".github/nfpm.yaml"
+      - "scripts/package.sh"
+      - "scripts/repository.sh"
+      - "scripts/test-repository.sh"
       - "Cargo.toml"
       - "Cargo.lock"
       - "rust-toolchain.toml"
 
 permissions:
   contents: read
+
+concurrency:
+  group: release-${{ github.event_name == 'pull_request' && github.ref || 'publish' }}
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -83,22 +91,85 @@ jobs:
           path: dist/*.tar.gz
           if-no-files-found: error
 
-  publish:
-    if: github.ref_type == 'tag'
+  packages:
     needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v7
       - uses: actions/download-artifact@v4
         with:
           pattern: rdu-*
           path: dist
           merge-multiple: true
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+          cache: false
+      - name: Install packaging tools
+        run: |
+          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.48.0
+          sudo apt-get update
+          sudo apt-get install --yes apt-utils createrepo-c rpm
+      - name: Restore package repository
+        run: |
+          repository="$RUNNER_TEMP/package-repository"
+          remote_ref="$(git ls-remote origin refs/heads/gh-pages)"
+          if [[ -n "$remote_ref" ]]; then
+            git fetch origin refs/heads/gh-pages
+            git worktree add --detach "$repository" FETCH_HEAD
+          else
+            git worktree add --detach "$repository"
+            git -C "$repository" switch --orphan package-repository
+          fi
+      - name: Build and test signed packages and repositories
+        env:
+          SIGNING_KEY: ${{ secrets.PACKAGE_SIGNING_KEY }}
+          SIGNING_PASSPHRASE: ${{ secrets.PACKAGE_SIGNING_PASSPHRASE }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          IS_RELEASE: ${{ github.ref_type == 'tag' }}
+        run: |
+          export GNUPGHOME
+          GNUPGHOME="$(mktemp -d)"
+          trap 'gpgconf --kill all; rm -rf -- "$GNUPGHOME"' EXIT
+          export RPM_SIGNING_KEY_FILE="$GNUPGHOME/signing-key.asc"
+          if [[ "$IS_RELEASE" == true ]]; then
+            if [[ -z "$SIGNING_KEY" ]]; then
+              echo "::error::Set PACKAGE_SIGNING_KEY and PACKAGE_SIGNING_PASSPHRASE before releasing"
+              exit 1
+            fi
+            printf '%s\n' "$SIGNING_KEY" > "$RPM_SIGNING_KEY_FILE"
+            gpg --batch --import "$RPM_SIGNING_KEY_FILE"
+            version="${RELEASE_TAG#v}"
+          else
+            export SIGNING_PASSPHRASE=""
+            gpg --batch --pinentry-mode loopback --passphrase '' \
+              --quick-generate-key 'rdu CI <ci@example.invalid>' rsa3072 sign 1d
+            gpg --batch --armor --export-secret-keys > "$RPM_SIGNING_KEY_FILE"
+            version="$(cargo metadata --no-deps --format-version 1 --locked |
+              jq -r '.packages[] | select(.name == "rdu") | .version')"
+          fi
+          fingerprint="$(gpg --batch --with-colons --list-secret-keys |
+            awk -F: '$1 == "fpr" { print $10; exit }')"
+          test -n "$fingerprint"
+          export NFPM_RPM_PASSPHRASE="$SIGNING_PASSPHRASE"
+          bash scripts/package.sh "$version" dist
+          bash scripts/repository.sh dist "$RUNNER_TEMP/package-repository" "$fingerprint"
+          bash scripts/test-repository.sh dist "$RUNNER_TEMP/package-repository"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-packages
+          path: |
+            dist/*.deb
+            dist/*.rpm
+          if-no-files-found: error
       - name: Generate checksums
+        if: github.ref_type == 'tag'
         working-directory: dist
-        run: sha256sum rdu-*.tar.gz > SHA256SUMS
+        run: sha256sum -- rdu-*.tar.gz *.deb *.rpm > SHA256SUMS
       - name: Publish GitHub release
+        if: github.ref_type == 'tag'
         run: |
           gh release create "$RELEASE_TAG" dist/* \
             --repo "$GITHUB_REPOSITORY" \
@@ -106,3 +177,33 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
+      - name: Save package repository
+        if: github.ref_type == 'tag'
+        working-directory: ${{ runner.temp }}/package-repository
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add .
+          git commit -m "Publish packages for $RELEASE_TAG"
+          git push origin HEAD:refs/heads/gh-pages
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+      - uses: actions/upload-pages-artifact@v3
+        if: github.ref_type == 'tag'
+        with:
+          path: ${{ runner.temp }}/package-repository
+
+  deploy:
+    if: github.ref_type == 'tag'
+    needs: packages
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/configure-pages@v5
+      - uses: actions/deploy-pages@v4
+        id: deployment

@@ -1,0 +1,26 @@
+name: rdu
+arch: ${PACKAGE_ARCH}
+platform: linux
+version: ${PACKAGE_VERSION}
+maintainer: mgl <mgl@users.noreply.github.com>
+description: Very fast disk usage analyzer
+homepage: https://github.com/mgl/rdu
+license: MIT
+section: utils
+priority: optional
+contents:
+  - src: ${PACKAGE_ROOT}/rdu
+    dst: /usr/bin/rdu
+    expand: true
+  - src: ${PACKAGE_ROOT}/LICENSE
+    dst: /usr/share/licenses/rdu/LICENSE
+    expand: true
+  - src: ${PACKAGE_ROOT}/README.md
+    dst: /usr/share/doc/rdu/README.md
+    expand: true
+deb:
+  compression: xz
+rpm:
+  compression: xz
+  signature:
+    key_file: ${RPM_SIGNING_KEY_FILE}
