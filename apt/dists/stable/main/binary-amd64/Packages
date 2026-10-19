@@ -1,0 +1,16 @@
+Package: rdu
+Architecture: amd64
+Version: 0.1.4
+Priority: optional
+Section: utils
+Maintainer: mgl <mgl@users.noreply.github.com>
+Installed-Size: 3552
+Filename: pool/main/rdu_0.1.4_amd64.deb
+Size: 1268808
+MD5sum: e59b6788a286b3f3d182f6a67681f6d1
+SHA1: c5e57ba26002f876f741507289e104daf5bbe5bd
+SHA256: 6c6be732da10acfb42a29085f4d9f7c655456f0c249b471393d59a20bd469746
+SHA512: 7fe7e412a8dec6de9752ecb294b2ba9d40d0ea50579659e8b54679d48d813ed045f6dc82b95508223dee07a5914e54cfec14fc799b6ed13ebcc1ef9a51bb0c15
+Homepage: https://github.com/mgl/rdu
+Description: Very fast disk usage analyzer
+
